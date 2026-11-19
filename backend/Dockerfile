@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -18,6 +18,7 @@ RUN pip install --upgrade pip && \
 
 COPY --chown=appuser:appgroup app ./app
 COPY --chown=appuser:appgroup scripts ./scripts
+COPY --chown=appuser:appgroup tests ./tests
 
 USER appuser
 

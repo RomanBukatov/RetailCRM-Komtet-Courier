@@ -48,3 +48,5 @@ Thumbs.db
 .claude/
 bin/
 obj/
+
+.tmp_screenshots/

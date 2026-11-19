@@ -740,25 +740,25 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
           className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-60 sm:w-auto"
         >
           {saving ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
+            <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
           ) : (
-            <Save className="h-4 w-4" />
+            <Save className="h-4 w-4 shrink-0" />
           )}
-          Сохранить настройки
+          <span>Сохранить настройки</span>
         </button>
 
         <button
           type="button"
           onClick={() => void handleTestConnection()}
           disabled={saving || testing}
-          className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-5 py-2.5 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-60 sm:w-auto"
+          className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-5 py-2.5 text-center text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-60 sm:w-auto"
         >
           {testing ? (
-            <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
+            <Loader2 className="h-4 w-4 shrink-0 animate-spin text-blue-600" />
           ) : (
-            <PlugZap className="h-4 w-4 text-blue-600" />
+            <PlugZap className="h-4 w-4 shrink-0 text-blue-600" />
           )}
-          Проверить подключение и инициализировать komtet_id
+          <span>Проверить подключение и инициализировать komtet_id</span>
         </button>
       </div>
 

@@ -558,7 +558,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                         : "text-slate-700 hover:bg-slate-100"
                     }`}
                   >
-                    <div className="flex min-w-0 items-center gap-2">
+                    <div className="flex min-w-0 flex-1 items-start gap-2 sm:items-center">
                       <input
                         type="checkbox"
                         checked={checked}
@@ -569,11 +569,16 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                             setTriggerStatuses,
                           )
                         }
-                        className="h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600"
+                        className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600 sm:mt-0"
                       />
-                      <span className="truncate">{st.name}</span>
+                      <div className="min-w-0 flex-1">
+                        <div className="break-words sm:truncate">{st.name}</div>
+                        <div className="truncate font-mono text-[10px] text-slate-400 sm:hidden">
+                          {st.code}
+                        </div>
+                      </div>
                     </div>
-                    <span className="shrink-0 font-mono text-[11px] text-slate-400">
+                    <span className="hidden shrink-0 font-mono text-[11px] text-slate-400 sm:inline">
                       {st.code}
                     </span>
                   </label>
@@ -601,7 +606,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                         : "text-slate-700 hover:bg-slate-100"
                     }`}
                   >
-                    <div className="flex min-w-0 items-center gap-2">
+                    <div className="flex min-w-0 flex-1 items-start gap-2 sm:items-center">
                       <input
                         type="checkbox"
                         checked={checked}
@@ -612,11 +617,16 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                             setCancelStatuses,
                           )
                         }
-                        className="h-4 w-4 shrink-0 rounded border-slate-300 text-red-600"
+                        className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-red-600 sm:mt-0"
                       />
-                      <span className="truncate">{st.name}</span>
+                      <div className="min-w-0 flex-1">
+                        <div className="break-words sm:truncate">{st.name}</div>
+                        <div className="truncate font-mono text-[10px] text-slate-400 sm:hidden">
+                          {st.code}
+                        </div>
+                      </div>
                     </div>
-                    <span className="shrink-0 font-mono text-[11px] text-slate-400">
+                    <span className="hidden shrink-0 font-mono text-[11px] text-slate-400 sm:inline">
                       {st.code}
                     </span>
                   </label>

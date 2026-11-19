@@ -257,9 +257,30 @@ async def test_database_models_crud(tmp_path: Path) -> None:
     await test_engine.dispose()
 
 
-def test_fastapi_health_endpoints() -> None:
+def _bind_isolated_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str = "app.db") -> None:
+    """Redirect global DB engine/sessionmaker to a temp SQLite file so TestClient never touches live data."""
+    import app.database as db_mod
+    import app.main as main_mod
+
+    isolated_engine = create_engine(f"sqlite+aiosqlite:///{(tmp_path / name).as_posix()}")
+    isolated_session_factory = async_sessionmaker(
+        bind=isolated_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+    monkeypatch.setattr(db_mod, "engine", isolated_engine)
+    monkeypatch.setattr(db_mod, "async_session_factory", isolated_session_factory)
+    monkeypatch.setattr(main_mod, "engine", isolated_engine)
+
+
+def test_fastapi_health_endpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Verify FastAPI app boots cleanly and serves health endpoints."""
+    _bind_isolated_db(monkeypatch, tmp_path, "health.db")
     test_settings = Settings(
+        _env_file=None,
         retailcrm_url="https://demo.retailcrm.ru",
         retailcrm_api_key="demo-key",
         komtet_shop_id="shop",
@@ -391,8 +412,11 @@ async def test_cleanup_old_logs_batched_and_sqlite_busy_timeout(tmp_path: Path) 
     await test_engine.dispose()
 
 
-def test_production_hides_openapi_and_disables_default_localhost_cors() -> None:
+def test_production_hides_openapi_and_disables_default_localhost_cors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Verify production disables Swagger/OpenAPI and localhost CORS unless explicitly configured."""
+    _bind_isolated_db(monkeypatch, tmp_path, "prod_cors.db")
     prod_settings = Settings(
         _env_file=None,
         app_env="production",
@@ -412,6 +436,7 @@ def test_production_hides_openapi_and_disables_default_localhost_cors() -> None:
         assert "access-control-allow-origin" not in cors_resp.headers
 
     # Explicit CORS_ORIGINS in production is honored while localhost remains rejected
+    _bind_isolated_db(monkeypatch, tmp_path, "prod_cors_explicit.db")
     explicit_prod = Settings(
         _env_file=None,
         app_env="production",
@@ -428,10 +453,13 @@ def test_production_hides_openapi_and_disables_default_localhost_cors() -> None:
         assert "access-control-allow-origin" not in blocked.headers
 
 
-def test_lifespan_skips_log_retention_loop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_lifespan_skips_log_retention_loop_when_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Verify lifespan does not schedule _log_retention_loop when LOG_RETENTION_DAYS <= 0."""
     import app.main as main_mod
 
+    _bind_isolated_db(monkeypatch, tmp_path, "retention_disabled.db")
     started = False
 
     async def fake_loop(_days: int) -> None:

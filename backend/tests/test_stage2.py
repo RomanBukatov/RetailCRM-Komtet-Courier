@@ -59,9 +59,11 @@ def _test_env_settings(**overrides: Any) -> Settings:
         "komtet_queue_id": 12345,
         "komtet_api_version": "v2",
         "komtet_callback_url": "https://sync.example.com/webhooks/komtet",
+        "admin_api_token": "",
+        "retailcrm_webhook_token": "",
     }
     defaults.update(overrides)
-    return Settings(**defaults)
+    return Settings(_env_file=None, **defaults)
 
 
 def _sample_config(**overrides: Any) -> RuntimeConfig:

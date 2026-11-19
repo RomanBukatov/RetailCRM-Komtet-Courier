@@ -118,51 +118,75 @@ docker compose ps
 curl http://127.0.0.1:8080/health
 ```
 
-Веб-панель управления будет доступна по адресу `http://127.0.0.1:8080` (или `https://sync.your-domain.ru` после настройки внешнего Nginx).
+Веб-панель управления будет доступна локально на loopback-адресе `http://127.0.0.1:8080` (порт привязан строго к `127.0.0.1`, чтобы не открывать HTTP наружу в обход UFW), а после настройки внешнего Nginx — по `https://sync.your-domain.ru`.
+
+### Хранение данных и резервное копирование (`komtet_data`)
+
+База данных SQLite (`/app/data/integration.db` в WAL-режиме) хранится в Docker named volume **`komtet_data`**. Использование named volume гарантирует, что непривилегированный пользователь `appuser` внутри контейнера всегда имеет права на запись на Linux VPS без ручного `chown`.
+
+Полезные команды обслуживания:
+
+```bash
+# Проверить расположение и метаданные volume
+docker volume inspect komtet-retailcrm_komtet_data
+
+# Горячий бэкап SQLite (через встроенный Python внутри запущенного контейнера)
+docker compose exec -T backend python -c "import sqlite3; src=sqlite3.connect('/app/data/integration.db'); dst=sqlite3.connect('/tmp/backup.db'); src.backup(dst); dst.close(); src.close()"
+docker compose cp backend:/tmp/backup.db ./integration-backup-$(date +%F).db
+docker compose exec -T backend rm -f /tmp/backup.db
+```
+
+> Не используйте `docker compose down -v`, если не хотите удалить базу данных и сохранённые настройки.
 
 ---
 
 ## Настройка внешнего Nginx + Certbot (HTTPS на продакшн-VPS)
 
-КОМТЕТ Касса подписывает обратные вебхуки заголовком `X-HMAC-Signature`, вычисляя HMAC-MD5 от полного внешнего HTTPS URL. Внешний Nginx на хосте должен передавать заголовки `Host`, `X-Forwarded-Proto` и `X-Forwarded-Host`:
+КОМТЕТ Касса подписывает обратные вебхуки заголовком `X-HMAC-Signature`, вычисляя HMAC-MD5 от полного внешнего HTTPS URL. Внешний Nginx на хосте должен передавать заголовки `Host`, `X-Forwarded-Proto` и `X-Forwarded-Host` (используйте `$http_host`, чтобы корректно сохранять нестандартные порты при наличии).
+
+### 1. Создайте первичный HTTP-конфиг (до выпуска сертификата)
+
+Создайте файл `/etc/nginx/sites-available/komtet-retailcrm`:
 
 ```nginx
 server {
     listen 80;
     server_name sync.your-domain.ru;
 
-    location / {
-        return 301 https://$host$request_uri;
-    }
-}
-
-server {
-    listen 443 ssl http2;
-    server_name sync.your-domain.ru;
-
-    ssl_certificate     /etc/letsencrypt/live/sync.your-domain.ru/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/sync.your-domain.ru/privkey.pem;
-
     client_max_body_size 2m;
 
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_connect_timeout 10s;
+        proxy_send_timeout 90s;
+        proxy_read_timeout 90s;
     }
 }
 ```
 
-Выпуск сертификата Let's Encrypt:
+Активируйте сайт и проверьте конфигурацию Nginx:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/komtet-retailcrm /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### 2. Выпустите сертификат Let's Encrypt через Certbot
+
+`certbot --nginx` автоматически выпустит сертификат, добавит `server` на порту `443 ssl` и настроит редирект с HTTP на HTTPS:
 
 ```bash
 sudo apt update && sudo apt install -y nginx certbot python3-certbot-nginx
-sudo certbot --nginx -d sync.your-domain.ru
+sudo certbot --nginx -d sync.your-domain.ru --redirect
 ```
+
+После этого в секции `443 ssl` сохранятся все директивы `proxy_set_header` и увеличенный таймаут `proxy_read_timeout 90s;` (достаточный для ретраев внешних API).
 
 ---
 
@@ -201,13 +225,17 @@ sudo certbot --nginx -d sync.your-domain.ru
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
-| `APP_ENV` | `development` | Окружение (`development`, `staging`, `production`, `test`). В `production` токены обязательны |
-| `APP_TIMEZONE` | `Europe/Moscow` | Часовой пояс для `paidAt` оплат и дат доставки |
-| `APP_PORT` | `8080` | Внешний HTTP-порт контейнера `frontend` (Nginx) |
+| `APP_ENV` | `production` (Docker / `.env.example`), `development` (локально) | Окружение (`development`, `staging`, `production`, `test`). В `production` токены обязательны, Swagger/OpenAPI и dev CORS отключены |
+| `APP_TIMEZONE` | `Europe/Moscow` | Часовой пояс для `paidAt` оплат и дат доставки (работает через `ZoneInfo` + `tzdata`) |
+| `APP_PORT` | `8080` | Локальный порт `127.0.0.1:${APP_PORT}:80` контейнера `frontend` (Nginx) |
+| `LOG_LEVEL` | `INFO` | Уровень логирования бэкенда (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `LOG_RETENTION_DAYS` | `30` | Срок хранения записей `sync_logs` в днях (батчевая очистка; `<= 0` отключает фоновую очистку) |
+| `HTTP_TIMEOUT_SECONDS` | `15.0` | Таймаут исходящих HTTP-запросов к RetailCRM и КОМТЕТ Кассе (в секундах) |
+| `CORS_ORIGINS` | `[]` в `production`, `localhost` в `dev` | Явный список разрешённых CORS-origins (JSON-массив или список через запятую) |
 | `PUBLIC_BASE_URL` | `""` | Базовый публичный HTTPS URL сервиса |
 | `KOMTET_CALLBACK_URL` | `""` | Полный URL для обратных вебхуков КОМТЕТ (`<PUBLIC_BASE_URL>/webhooks/komtet`) |
-| `ADMIN_API_TOKEN` | `""` | Bearer-токен для доступа к веб-панели и `/api/v1/*` |
-| `RETAILCRM_WEBHOOK_TOKEN` | `""` | Секретный токен для верификации входящих триггеров `/webhooks/retailcrm` |
+| `ADMIN_API_TOKEN` | `""` | Bearer-токен для доступа к веб-панели и `/api/v1/*` (в `production` обязателен, fail-closed) |
+| `RETAILCRM_WEBHOOK_TOKEN` | `""` | Секретный токен для верификации входящих триггеров `/webhooks/retailcrm` (в `production` обязателен, fail-closed) |
 | `RETAILCRM_URL` | `""` | URL аккаунта RetailCRM (`https://your-shop.retailcrm.ru`) |
 | `RETAILCRM_API_KEY` | `""` | API-ключ RetailCRM API v5 |
 | `RETAILCRM_DEFAULT_SITE` | `""` | Символьный код сайта (магазина) в RetailCRM по умолчанию |
@@ -216,7 +244,7 @@ sudo certbot --nginx -d sync.your-domain.ru
 | `KOMTET_SECRET_KEY` | `""` | Секретный ключ магазина для подписи `X-HMAC-Signature` |
 | `KOMTET_QUEUE_ID` | `None` | Числовой ID очереди (кассы) в КОМТЕТ Кассе |
 | `KOMTET_API_VERSION` | `v2` | Версия API заказов КОМТЕТ (`v2` или `v1`) |
-| `DATABASE_URL` | `sqlite+aiosqlite:///.../data/integration.db` | Строка подключения SQLAlchemy 2.0 |
+| `DATABASE_URL` | `sqlite+aiosqlite:////app/data/integration.db` (Docker) | Строка подключения SQLAlchemy 2.0 (в Docker хранится в volume `komtet_data`) |
 
 ---
 
@@ -243,8 +271,10 @@ sudo certbot --nginx -d sync.your-domain.ru
 ## Локальная разработка и запуск тестов
 
 ```bash
-# 1. Запуск тестов бэкенда
-.\.venv\Scripts\python.exe -m pytest backend/tests/ -v
+# 1. Запуск тестов бэкенда (в активированном виртуальном окружении или в контейнере)
+python -m pytest backend/tests/ -v
+# или через Docker Compose:
+docker compose run --rm --no-deps backend pytest -v
 
 # 2. Сборка фронтенда (TypeScript + Vite)
 cd frontend

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -39,9 +39,59 @@ const VAT_OPTIONS = [
   { value: "22", label: "22% — НДС 22%" },
   { value: "20", label: "20% — НДС 20%" },
   { value: "10", label: "10% — НДС 10%" },
+  { value: "7", label: "7% — НДС 7% (УСН)" },
+  { value: "5", label: "5% — НДС 5% (УСН)" },
   { value: "0", label: "0% — НДС 0%" },
   { value: "no", label: "no — Без НДС" },
+  { value: "122", label: "22/122 — расчётная ставка (122)" },
+  { value: "120", label: "20/120 — расчётная ставка (120)" },
+  { value: "110", label: "10/110 — расчётная ставка (110)" },
+  { value: "107", label: "7/107 — расчётная ставка (107)" },
+  { value: "105", label: "5/105 — расчётная ставка (105)" },
 ];
+
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  if (
+    typeof navigator !== "undefined" &&
+    navigator.clipboard &&
+    typeof navigator.clipboard.writeText === "function" &&
+    typeof window !== "undefined" &&
+    window.isSecureContext
+  ) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fall through to legacy textarea fallback
+    }
+  }
+
+  if (typeof document === "undefined") {
+    return false;
+  }
+
+  let textarea: HTMLTextAreaElement | null = null;
+  try {
+    textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.top = "-9999px";
+    textarea.style.left = "-9999px";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    if (textarea && textarea.parentNode) {
+      textarea.parentNode.removeChild(textarea);
+    }
+  }
+}
 
 export const ConnectionTab: React.FC<ConnectionTabProps> = ({
   settings,
@@ -79,6 +129,20 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
   );
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
+  const copyTimerRef = useRef<number | null>(null);
+  const saveTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     if (!settings) return;
     setRetailcrmUrl(settings.retailcrm_url || "");
@@ -109,18 +173,29 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
   }, [settings]);
 
   const origin =
-    typeof window !== "undefined" ? window.location.origin : "https://your-domain.ru";
+    typeof window !== "undefined"
+      ? window.location.origin
+      : "https://your-domain.ru";
   const crmWebhookUrl = `${origin}/webhooks/retailcrm`;
-  const komtetWebhookUrl = komtetCallbackUrl.trim() || `${origin}/webhooks/komtet`;
+  const komtetWebhookUrl =
+    komtetCallbackUrl.trim() || `${origin}/webhooks/komtet`;
 
   const handleCopy = async (key: string, text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopiedKey(key);
-      setTimeout(() => setCopiedKey(null), 2000);
-    } catch {
-      // Fallback
+    const copied = await copyTextToClipboard(text);
+    if (!copied) {
+      setErrorMsg(
+        "Не удалось скопировать URL в буфер обмена. Скопируйте значение вручную.",
+      );
+      return;
     }
+    setCopiedKey(key);
+    if (copyTimerRef.current !== null) {
+      window.clearTimeout(copyTimerRef.current);
+    }
+    copyTimerRef.current = window.setTimeout(() => {
+      setCopiedKey(null);
+      copyTimerRef.current = null;
+    }, 2000);
   };
 
   const buildUpdatePayload = (): SettingsUpdateRequest => {
@@ -149,11 +224,30 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
     if (komtetSecretKey.trim()) {
       payload.komtet_secret_key = komtetSecretKey.trim();
     }
-    const parsedQueue = parseInt(komtetQueueId.trim(), 10);
-    if (!Number.isNaN(parsedQueue) && parsedQueue > 0) {
-      payload.komtet_queue_id = parsedQueue;
+
+    const trimmedQueue = komtetQueueId.trim();
+    if (trimmedQueue === "") {
+      payload.komtet_queue_id = null;
+    } else if (!/^\d+$/.test(trimmedQueue) || Number(trimmedQueue) <= 0) {
+      throw new Error(
+        "Queue ID (ID очереди кассы) должен быть целым положительным числом или пустым.",
+      );
+    } else {
+      payload.komtet_queue_id = Number(trimmedQueue);
     }
+
     return payload;
+  };
+
+  const showSaveSuccess = (message: string) => {
+    setSaveSuccess(message);
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+    saveTimerRef.current = window.setTimeout(() => {
+      setSaveSuccess(null);
+      saveTimerRef.current = null;
+    }, 4000);
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -162,10 +256,10 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
     setErrorMsg(null);
     setSaveSuccess(null);
     try {
-      const updated = await api.updateSettings(buildUpdatePayload());
+      const payload = buildUpdatePayload();
+      const updated = await api.updateSettings(payload);
       onSettingsUpdated(updated);
-      setSaveSuccess("Настройки успешно сохранены");
-      setTimeout(() => setSaveSuccess(null), 4000);
+      showSaveSuccess("Настройки успешно сохранены");
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         onUnauthorized();
@@ -185,7 +279,8 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
     setSaveSuccess(null);
     try {
       // Save current form changes first so connection test uses fresh inputs
-      const updated = await api.updateSettings(buildUpdatePayload());
+      const payload = buildUpdatePayload();
+      const updated = await api.updateSettings(payload);
       onSettingsUpdated(updated);
       const res = await api.testConnection();
       setCheckResult(res);
@@ -204,14 +299,18 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
     }
   };
 
+  const vatOptions = VAT_OPTIONS.some((opt) => opt.value === defaultVat)
+    ? VAT_OPTIONS
+    : [...VAT_OPTIONS, { value: defaultVat, label: `${defaultVat} (текущая)` }];
+
   return (
-    <form onSubmit={handleSave} className="space-y-6">
+    <form onSubmit={handleSave} className="space-y-5 sm:space-y-6">
       {errorMsg && (
         <div className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
           <XCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-600" />
-          <div>
+          <div className="min-w-0">
             <div className="font-semibold">Ошибка сохранения или проверки</div>
-            <div className="mt-0.5">{errorMsg}</div>
+            <div className="mt-0.5 break-words">{errorMsg}</div>
           </div>
         </div>
       )}
@@ -223,14 +322,14 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-5 sm:gap-6 lg:grid-cols-2">
         {/* Блок RetailCRM */}
-        <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
           <div className="mb-4 flex items-center gap-2.5 border-b border-slate-100 pb-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
               <Store className="h-5 w-5" />
             </div>
-            <div>
+            <div className="min-w-0">
               <h2 className="text-base font-semibold text-slate-900">
                 Подключение к RetailCRM
               </h2>
@@ -255,7 +354,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
             </div>
 
             <div>
-              <div className="mb-1 flex items-center justify-between">
+              <div className="mb-1 flex flex-wrap items-center justify-between gap-1.5">
                 <label className="text-xs font-medium text-slate-700">
                   API-ключ RetailCRM
                 </label>
@@ -308,19 +407,19 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
             </div>
 
             <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
                   <div className="text-xs font-medium text-slate-700">
                     URL вебхука для триггера в RetailCRM
                   </div>
-                  <div className="truncate font-mono text-xs text-slate-600">
+                  <div className="mt-0.5 break-all font-mono text-xs text-slate-600 sm:truncate">
                     {crmWebhookUrl}
                   </div>
                 </div>
                 <button
                   type="button"
-                  onClick={() => handleCopy("crm", crmWebhookUrl)}
-                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                  onClick={() => void handleCopy("crm", crmWebhookUrl)}
+                  className="inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 sm:w-auto sm:py-1.5"
                 >
                   {copiedKey === "crm" ? (
                     <>
@@ -330,7 +429,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                   ) : (
                     <>
                       <Copy className="h-3.5 w-3.5" />
-                      Скопировать URL вебхука RetailCRM
+                      Скопировать URL
                     </>
                   )}
                 </button>
@@ -340,12 +439,12 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
         </div>
 
         {/* Блок КОМТЕТ Касса */}
-        <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
           <div className="mb-4 flex items-center gap-2.5 border-b border-slate-100 pb-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
               <Truck className="h-5 w-5" />
             </div>
-            <div>
+            <div className="min-w-0">
               <h2 className="text-base font-semibold text-slate-900">
                 Подключение к КОМТЕТ Касса Курьер
               </h2>
@@ -356,8 +455,8 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
           </div>
 
           <div className="space-y-4">
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-              <div className="sm:col-span-2">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-5">
+              <div className="sm:col-span-3">
                 <label className="mb-1 block text-xs font-medium text-slate-700">
                   Базовый URL API КОМТЕТ
                 </label>
@@ -370,7 +469,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                 />
               </div>
 
-              <div>
+              <div className="sm:col-span-2">
                 <label className="mb-1 block text-xs font-medium text-slate-700">
                   Версия API
                 </label>
@@ -381,8 +480,8 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                   }
                   className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                 >
-                  <option value="v2">API v2 (рекомендуется)</option>
-                  <option value="v1">API v1</option>
+                  <option value="v2">API v2 (основная)</option>
+                  <option value="v1">API v1 (устаревшая)</option>
                 </select>
               </div>
             </div>
@@ -407,16 +506,18 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                 </label>
                 <input
                   type="number"
+                  min={1}
+                  inputMode="numeric"
                   value={komtetQueueId}
                   onChange={(e) => setKomtetQueueId(e.target.value)}
-                  placeholder="Например: 12345"
+                  placeholder="Пусто — без привязки"
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                 />
               </div>
             </div>
 
             <div>
-              <div className="mb-1 flex items-center justify-between">
+              <div className="mb-1 flex flex-wrap items-center justify-between gap-1.5">
                 <label className="text-xs font-medium text-slate-700">
                   Secret Key (Секретный ключ магазина)
                 </label>
@@ -450,12 +551,12 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                   value={komtetCallbackUrl}
                   onChange={(e) => setKomtetCallbackUrl(e.target.value)}
                   placeholder={`${origin}/webhooks/komtet`}
-                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  className="w-full min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                 />
                 <button
                   type="button"
-                  onClick={() => handleCopy("komtet", komtetWebhookUrl)}
-                  className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                  onClick={() => void handleCopy("komtet", komtetWebhookUrl)}
+                  className="inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 sm:w-auto"
                 >
                   {copiedKey === "komtet" ? (
                     <>
@@ -465,7 +566,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                   ) : (
                     <>
                       <Copy className="h-3.5 w-3.5" />
-                      Скопировать URL вебхука КОМТЕТ
+                      Скопировать URL
                     </>
                   )}
                 </button>
@@ -476,12 +577,12 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
       </div>
 
       {/* Блок Фискализация и Доставка */}
-      <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
         <div className="mb-4 flex items-center gap-2.5 border-b border-slate-100 pb-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
             <ShieldCheck className="h-5 w-5" />
           </div>
-          <div>
+          <div className="min-w-0">
             <h2 className="text-base font-semibold text-slate-900">
               Фискализация, доставка и защита
             </h2>
@@ -518,7 +619,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
               onChange={(e) => setDefaultVat(e.target.value)}
               className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
             >
-              {VAT_OPTIONS.map((opt) => (
+              {vatOptions.map((opt) => (
                 <option key={opt.value} value={opt.value}>
                   {opt.label}
                 </option>
@@ -532,6 +633,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
             </label>
             <input
               type="text"
+              inputMode="numeric"
               value={companyInn}
               onChange={(e) => setCompanyInn(e.target.value)}
               placeholder="10 или 12 цифр"
@@ -562,14 +664,14 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                 type="time"
                 value={deliveryTimeFrom}
                 onChange={(e) => setDeliveryTimeFrom(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 px-2.5 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                className="w-full min-w-0 rounded-lg border border-slate-300 px-2.5 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
               />
-              <span className="text-slate-400">—</span>
+              <span className="shrink-0 text-slate-400">—</span>
               <input
                 type="time"
                 value={deliveryTimeTo}
                 onChange={(e) => setDeliveryTimeTo(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 px-2.5 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                className="w-full min-w-0 rounded-lg border border-slate-300 px-2.5 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
               />
             </div>
           </div>
@@ -582,6 +684,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
               type="number"
               min={0}
               max={3600}
+              inputMode="numeric"
               value={antiLoopSeconds}
               onChange={(e) => setAntiLoopSeconds(Number(e.target.value))}
               className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
@@ -590,8 +693,8 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
         </div>
 
         <div className="mt-5 grid grid-cols-1 gap-4 border-t border-slate-100 pt-4 sm:grid-cols-2">
-          <label className="flex cursor-pointer items-center justify-between rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 hover:bg-slate-100/70">
-            <div className="pr-3">
+          <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 hover:bg-slate-100/70">
+            <div className="min-w-0">
               <div className="text-sm font-medium text-slate-900">
                 Автоматическая синхронизация
               </div>
@@ -603,35 +706,38 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
               type="checkbox"
               checked={autoSyncEnabled}
               onChange={(e) => setAutoSyncEnabled(e.target.checked)}
-              className="h-5 w-5 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+              className="h-5 w-5 shrink-0 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
             />
           </label>
 
-          <label className="flex cursor-pointer items-center justify-between rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 hover:bg-slate-100/70">
-            <div className="pr-3">
+          <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 hover:bg-slate-100/70">
+            <div className="min-w-0">
               <div className="text-sm font-medium text-slate-900">
                 Проверять подпись X-HMAC-Signature
               </div>
               <div className="text-xs text-slate-500">
-                Криптографическая проверка подлинности обратных вебхуков от КОМТЕТ Кассы
+                Криптографическая проверка подлинности обратных вебхуков от КОМТЕТ Кассы.{" "}
+                <span className="font-medium text-slate-700">
+                  В окружении production подпись проверяется принудительно.
+                </span>
               </div>
             </div>
             <input
               type="checkbox"
               checked={verifyKomtetSignature}
               onChange={(e) => setVerifyKomtetSignature(e.target.checked)}
-              className="h-5 w-5 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+              className="h-5 w-5 shrink-0 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
             />
           </label>
         </div>
       </div>
 
       {/* Кнопки действий */}
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:flex-wrap sm:items-center">
         <button
           type="submit"
           disabled={saving || testing}
-          className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-60"
+          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-60 sm:w-auto"
         >
           {saving ? (
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -643,9 +749,9 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
 
         <button
           type="button"
-          onClick={handleTestConnection}
+          onClick={() => void handleTestConnection()}
           disabled={saving || testing}
-          className="inline-flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-5 py-2.5 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-60"
+          className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-5 py-2.5 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50 disabled:opacity-60 sm:w-auto"
         >
           {testing ? (
             <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
@@ -658,7 +764,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
 
       {/* Результаты проверки подключения */}
       {checkResult && (
-        <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+        <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
           <h3 className="text-sm font-semibold text-slate-900">
             Диагностика подключения и готовности интеграции
           </h3>
@@ -667,11 +773,11 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
             <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
               <div className="flex items-start gap-2.5">
                 <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
-                <div className="space-y-1">
+                <div className="min-w-0 space-y-1">
                   <div className="font-semibold">
                     Обратите внимание на предупреждения API:
                   </div>
-                  <ul className="list-inside list-disc space-y-1 text-xs">
+                  <ul className="list-inside list-disc space-y-1 break-words text-xs">
                     {checkResult.warnings.map((w, idx) => (
                       <li key={idx}>{w}</li>
                     ))}
@@ -697,11 +803,11 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
               <div className="mt-2 text-sm font-semibold text-slate-900">
                 {checkResult.retailcrm_ok ? "Подключено" : "Ошибка подключения"}
               </div>
-              <div className="mt-1 text-xs text-slate-600">
+              <div className="mt-1 break-words text-xs text-slate-600">
                 {checkResult.retailcrm_message}
               </div>
               {checkResult.retailcrm_sites.length > 0 && (
-                <div className="mt-2 text-[11px] text-slate-500">
+                <div className="mt-2 break-words text-[11px] text-slate-500">
                   Сайты: {checkResult.retailcrm_sites.join(", ")}
                 </div>
               )}
@@ -752,7 +858,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                       : "Авторизация успешна"
                   : "Ошибка авторизации"}
               </div>
-              <div className="mt-1 text-xs text-slate-600">
+              <div className="mt-1 break-words text-xs text-slate-600">
                 {checkResult.komtet_message}
               </div>
             </div>

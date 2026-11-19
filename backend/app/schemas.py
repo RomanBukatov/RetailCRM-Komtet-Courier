@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Literal, Optional
+import re
+from datetime import datetime, timezone
+from typing import Annotated, Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+
+_POSITIVE_INT_RE = re.compile(r"^\d+$")
+
+
+def _ensure_utc_datetime(value: datetime) -> datetime:
+    """Attach UTC timezone to naive SQLite datetimes and normalize aware values to UTC."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+UtcDateTime = Annotated[datetime, AfterValidator(_ensure_utc_datetime)]
 
 
 class SettingItemSchema(BaseModel):
@@ -17,7 +30,7 @@ class SettingItemSchema(BaseModel):
     is_secret: bool = False
     is_set: bool = True
     description: Optional[str] = None
-    updated_at: Optional[datetime] = None
+    updated_at: Optional[UtcDateTime] = None
 
 
 class SettingsResponse(BaseModel):
@@ -59,7 +72,7 @@ class SettingsUpdateRequest(BaseModel):
     komtet_base_url: Optional[str] = None
     komtet_shop_id: Optional[str] = None
     komtet_secret_key: Optional[str] = None
-    komtet_queue_id: Optional[int] = None
+    komtet_queue_id: Optional[int] = Field(default=None, ge=1)
     komtet_api_version: Optional[Literal["v1", "v2"]] = None
     tax_system: Optional[int] = Field(default=None, ge=0, le=5)
     default_vat: Optional[str] = None
@@ -106,6 +119,18 @@ class MappingItemSchema(BaseModel):
     is_active: bool = True
     extra: Optional[dict[str, Any]] = None
 
+    @model_validator(mode="after")
+    def _validate_courier_komtet_code(self) -> "MappingItemSchema":
+        if self.mapping_type == "courier":
+            cleaned = (self.komtet_code or "").strip()
+            if cleaned:
+                if not _POSITIVE_INT_RE.fullmatch(cleaned) or int(cleaned) <= 0:
+                    raise ValueError(
+                        "Для маппинга курьера komtet_code должен быть целым положительным числом"
+                    )
+                self.komtet_code = cleaned
+        return self
+
 
 class MappingsResponse(BaseModel):
     """List of mappings returned by GET /api/v1/mappings."""
@@ -150,7 +175,7 @@ class SyncLogItemSchema(BaseModel):
     message: str
     payload: Optional[dict[str, Any]] = None
     error_details: Optional[str] = None
-    created_at: datetime
+    created_at: UtcDateTime
 
 
 class SyncLogsResponse(BaseModel):
@@ -177,9 +202,9 @@ class OrderSyncItemSchema(BaseModel):
     sync_status: str
     last_hash: Optional[str] = None
     last_error: Optional[str] = None
-    last_synced_at: Optional[datetime] = None
-    last_komtet_callback_at: Optional[datetime] = None
-    updated_at: datetime
+    last_synced_at: Optional[UtcDateTime] = None
+    last_komtet_callback_at: Optional[UtcDateTime] = None
+    updated_at: UtcDateTime
 
 
 class OrderSyncListResponse(BaseModel):

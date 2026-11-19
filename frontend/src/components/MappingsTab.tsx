@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  ArrowRight,
   CheckCircle2,
   GitCompareArrows,
   Loader2,
@@ -33,17 +34,51 @@ const KOMTET_VAT_OPTIONS = [
   { code: "22", name: "НДС 22%" },
   { code: "20", name: "НДС 20%" },
   { code: "10", name: "НДС 10%" },
+  { code: "7", name: "НДС 7% (УСН)" },
+  { code: "5", name: "НДС 5% (УСН)" },
   { code: "0", name: "НДС 0%" },
   { code: "no", name: "Без НДС (no)" },
+  { code: "122", name: "НДС 22/122 (122)" },
+  { code: "120", name: "НДС 20/120 (120)" },
+  { code: "110", name: "НДС 10/110 (110)" },
+  { code: "107", name: "НДС 7/107 (107)" },
+  { code: "105", name: "НДС 5/105 (105)" },
 ];
 
-const DEFAULT_VAT_ROWS: Array<{ crmCode: string; crmName: string; komtetCode: string }> = [
+const DEFAULT_VAT_ROWS: Array<{
+  crmCode: string;
+  crmName: string;
+  komtetCode: string;
+}> = [
   { crmCode: "22", crmName: "НДС 22%", komtetCode: "22" },
   { crmCode: "20", crmName: "НДС 20%", komtetCode: "20" },
   { crmCode: "10", crmName: "НДС 10%", komtetCode: "10" },
   { crmCode: "0", crmName: "НДС 0%", komtetCode: "0" },
   { crmCode: "none", crmName: "Без НДС", komtetCode: "no" },
 ];
+
+const FALLBACK_STATUSES: Array<{ code: string; name: string }> = [
+  { code: "new", name: "Новый (new)" },
+  { code: "paid", name: "Оплачен (paid)" },
+  { code: "send-to-delivery", name: "Передан в доставку (send-to-delivery)" },
+  { code: "delivering", name: "Доставляется (delivering)" },
+  { code: "complete", name: "Выполнен (complete)" },
+  { code: "cancel-other", name: "Отменен (cancel-other)" },
+  { code: "no-product", name: "Нет в наличии (no-product)" },
+  { code: "otklonen", name: "Отклонен (otklonen)" },
+];
+
+const FALLBACK_PAYMENT_TYPES: Array<{ code: string; name: string }> = [
+  { code: "cash", name: "Наличные" },
+  { code: "bank-card", name: "Банковская карта" },
+  { code: "oplachen", name: "Оплачен (предоплата)" },
+];
+
+function isValidKomtetCourierId(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return true;
+  return /^\d+$/.test(trimmed) && Number(trimmed) > 0;
+}
 
 export const MappingsTab: React.FC<MappingsTabProps> = ({
   settings,
@@ -53,7 +88,9 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
   const [dictionaries, setDictionaries] = useState<DictionariesResponse | null>(
     null,
   );
+  const [loadedMappings, setLoadedMappings] = useState<MappingItem[]>([]);
   const [loadingDicts, setLoadingDicts] = useState(false);
+  const [loadedOk, setLoadedOk] = useState(false);
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -74,6 +111,16 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
   const [newCourierCode, setNewCourierCode] = useState("");
   const [newCourierName, setNewCourierName] = useState("");
 
+  const successTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (successTimerRef.current !== null) {
+        window.clearTimeout(successTimerRef.current);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     if (!settings) return;
     setTriggerStatuses(settings.trigger_statuses || []);
@@ -90,6 +137,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
         api.getMappings(),
       ]);
       setDictionaries(dicts);
+      setLoadedMappings(mappingsResp.items);
 
       const cMap: Record<string, string> = {};
       const pMap: Record<string, string> = {};
@@ -127,7 +175,9 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
       setPaymentMap(pMap);
       setVatMap(vMap);
       setCustomCouriers(extraCouriers);
+      setLoadedOk(true);
     } catch (err) {
+      setLoadedOk(false);
       if (err instanceof ApiError && err.status === 401) {
         onUnauthorized();
         return;
@@ -145,6 +195,121 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
   useEffect(() => {
     void loadData();
   }, [loadData]);
+
+  // Merge statuses from dictionaries (or fallback) with all configured trigger/cancel/final statuses
+  const statusesList = useMemo(() => {
+    const base =
+      dictionaries?.retailcrm_statuses &&
+      dictionaries.retailcrm_statuses.length > 0
+        ? dictionaries.retailcrm_statuses
+        : FALLBACK_STATUSES;
+
+    const map = new Map<string, { code: string; name: string }>();
+    for (const st of base) {
+      map.set(st.code, { code: st.code, name: st.name || st.code });
+    }
+    for (const code of [...triggerStatuses, ...cancelStatuses, finalStatus]) {
+      const trimmed = (code || "").trim();
+      if (trimmed && !map.has(trimmed)) {
+        map.set(trimmed, { code: trimmed, name: trimmed });
+      }
+    }
+    return Array.from(map.values());
+  }, [dictionaries, triggerStatuses, cancelStatuses, finalStatus]);
+
+  // Merge payment types from dictionaries (or fallback) with any extra persisted DB payment mappings
+  const paymentTypesList = useMemo(() => {
+    const base =
+      dictionaries?.retailcrm_payment_types &&
+      dictionaries.retailcrm_payment_types.length > 0
+        ? dictionaries.retailcrm_payment_types
+        : FALLBACK_PAYMENT_TYPES;
+
+    const map = new Map<string, { code: string; name: string }>();
+    for (const pt of base) {
+      map.set(pt.code, { code: pt.code, name: pt.name || pt.code });
+    }
+    for (const item of loadedMappings) {
+      if (item.is_active && item.mapping_type === "payment_type") {
+        if (!map.has(item.retailcrm_code)) {
+          map.set(item.retailcrm_code, {
+            code: item.retailcrm_code,
+            name: item.retailcrm_name || item.retailcrm_code,
+          });
+        }
+      }
+    }
+    return Array.from(map.values());
+  }, [dictionaries, loadedMappings]);
+
+  // Merge default VAT rows with any custom/non-standard VAT mappings loaded from DB
+  const vatRowsList = useMemo(() => {
+    const map = new Map<
+      string,
+      { crmCode: string; crmName: string; komtetCode: string }
+    >();
+    for (const row of DEFAULT_VAT_ROWS) {
+      map.set(row.crmCode, row);
+    }
+    for (const item of loadedMappings) {
+      if (item.is_active && item.mapping_type === "vat") {
+        if (!map.has(item.retailcrm_code)) {
+          map.set(item.retailcrm_code, {
+            crmCode: item.retailcrm_code,
+            crmName: item.retailcrm_name || `Ставка ${item.retailcrm_code}`,
+            komtetCode: item.komtet_code,
+          });
+        }
+      }
+    }
+    return Array.from(map.values());
+  }, [loadedMappings]);
+
+  const komtetStaffList = useMemo(() => {
+    return dictionaries?.komtet_couriers &&
+      dictionaries.komtet_couriers.length > 0
+      ? dictionaries.komtet_couriers
+      : dictionaries?.komtet_employees || [];
+  }, [dictionaries]);
+
+  const crmCouriersList = useMemo(() => {
+    const seen = new Set<string>();
+    const list: Array<{
+      code: string;
+      name: string;
+      active: boolean;
+      isCustom: boolean;
+    }> = [];
+
+    for (const c of dictionaries?.retailcrm_couriers || []) {
+      const code = String(c.id);
+      if (seen.has(code)) continue;
+      seen.add(code);
+      list.push({
+        code,
+        name:
+          [c.lastName, c.firstName, c.patronymic]
+            .filter(Boolean)
+            .join(" ")
+            .trim() || `Курьер #${c.id}`,
+        active: c.active !== false,
+        isCustom: false,
+      });
+    }
+
+    for (const c of customCouriers) {
+      if (seen.has(c.code)) continue;
+      seen.add(c.code);
+      list.push({
+        code: c.code,
+        name: c.name,
+        active: true,
+        isCustom: true,
+      });
+    }
+
+    return list;
+  }, [dictionaries, customCouriers]);
 
   const toggleStatusInList = (
     code: string,
@@ -180,31 +345,35 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
   };
 
   const handleSaveAll = async () => {
-    setSaving(true);
+    if (saving || loadingDicts || !loadedOk || !settings) {
+      return;
+    }
+
     setErrorMsg(null);
     setSuccessMsg(null);
+
+    // Client-side validation for manual KOMTET courier IDs
+    for (const crmCourier of crmCouriersList) {
+      const rawId = (courierMap[crmCourier.code] || "").trim();
+      if (rawId && !isValidKomtetCourierId(rawId)) {
+        setErrorMsg(
+          `Некорректный ID курьера КОМТЕТ "${rawId}" для «${crmCourier.name}»: укажите целое положительное число.`,
+        );
+        return;
+      }
+    }
+
+    setSaving(true);
     try {
       const items: MappingItem[] = [];
-
-      // 1) Couriers
-      const allCrmCouriers = [
-        ...(dictionaries?.retailcrm_couriers.map((c) => ({
-          code: String(c.id),
-          name:
-            [c.lastName, c.firstName, c.patronymic]
-              .filter(Boolean)
-              .join(" ")
-              .trim() || `Курьер #${c.id}`,
-        })) || []),
-        ...customCouriers,
-      ];
 
       const komtetCourierPool = [
         ...(dictionaries?.komtet_couriers || []),
         ...(dictionaries?.komtet_employees || []),
       ];
 
-      for (const crmCourier of allCrmCouriers) {
+      // 1) Couriers (merged CRM dictionary + persisted DB mappings + manual rows)
+      for (const crmCourier of crmCouriersList) {
         const komtetId = (courierMap[crmCourier.code] || "").trim();
         if (!komtetId) continue;
         const matchedEmp = komtetCourierPool.find(
@@ -220,18 +389,8 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
         });
       }
 
-      // 2) Payment types
-      const crmPaymentTypes =
-        dictionaries?.retailcrm_payment_types &&
-        dictionaries.retailcrm_payment_types.length > 0
-          ? dictionaries.retailcrm_payment_types
-          : [
-              { code: "cash", name: "Наличные" },
-              { code: "bank-card", name: "Банковская карта" },
-              { code: "oplachen", name: "Оплачен" },
-            ];
-
-      for (const pt of crmPaymentTypes) {
+      // 2) Payment types (merged CRM dictionary + persisted DB mappings)
+      for (const pt of paymentTypesList) {
         const komtetCode = (paymentMap[pt.code] || "").trim();
         if (!komtetCode) continue;
         const opt = KOMTET_PAYMENT_OPTIONS.find((o) => o.code === komtetCode);
@@ -245,8 +404,8 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
         });
       }
 
-      // 3) VAT rates
-      for (const row of DEFAULT_VAT_ROWS) {
+      // 3) VAT rates (merged defaults + non-standard persisted DB VAT mappings)
+      for (const row of vatRowsList) {
         const komtetVat = vatMap[row.crmCode] || row.komtetCode;
         const opt = KOMTET_VAT_OPTIONS.find((o) => o.code === komtetVat);
         items.push({
@@ -259,18 +418,41 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
         });
       }
 
-      const [, updatedSettings] = await Promise.all([
-        api.saveMappings(items, ["courier", "payment_type", "vat"]),
-        api.updateSettings({
-          trigger_statuses: triggerStatuses,
-          cancel_statuses: cancelStatuses,
-          final_status: finalStatus.trim() || "complete",
-        }),
-      ]);
+      // Only replace a mapping type when its RetailCRM source dictionary actually loaded;
+      // otherwise perform safe upsert so existing DB mappings are never wiped on CRM API outage.
+      const replaceTypes: string[] = ["vat"];
+      if (
+        dictionaries?.retailcrm_couriers &&
+        dictionaries.retailcrm_couriers.length > 0
+      ) {
+        replaceTypes.push("courier");
+      }
+      if (
+        dictionaries?.retailcrm_payment_types &&
+        dictionaries.retailcrm_payment_types.length > 0
+      ) {
+        replaceTypes.push("payment_type");
+      }
+
+      // Sequential writes avoid concurrent SQLite write lock contention
+      const savedMappings = await api.saveMappings(items, replaceTypes);
+      setLoadedMappings(savedMappings.items);
+
+      const updatedSettings = await api.updateSettings({
+        trigger_statuses: triggerStatuses,
+        cancel_statuses: cancelStatuses,
+        final_status: finalStatus.trim() || "complete",
+      });
 
       onSettingsUpdated(updatedSettings);
       setSuccessMsg("Статусы и таблицы маппинга успешно сохранены");
-      setTimeout(() => setSuccessMsg(null), 4000);
+      if (successTimerRef.current !== null) {
+        window.clearTimeout(successTimerRef.current);
+      }
+      successTimerRef.current = window.setTimeout(() => {
+        setSuccessMsg(null);
+        successTimerRef.current = null;
+      }, 4000);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         onUnauthorized();
@@ -286,60 +468,13 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
     }
   };
 
-  const statusesList =
-    dictionaries?.retailcrm_statuses &&
-    dictionaries.retailcrm_statuses.length > 0
-      ? dictionaries.retailcrm_statuses
-      : [
-          { code: "new", name: "Новый (new)" },
-          { code: "paid", name: "Оплачен (paid)" },
-          { code: "send-to-delivery", name: "Передан в доставку (send-to-delivery)" },
-          { code: "delivering", name: "Доставляется (delivering)" },
-          { code: "complete", name: "Выполнен (complete)" },
-          { code: "cancel-other", name: "Отменен (cancel-other)" },
-          { code: "no-product", name: "Нет в наличии (no-product)" },
-          { code: "otklonen", name: "Отклонен (otklonen)" },
-        ];
-
-  const paymentTypesList =
-    dictionaries?.retailcrm_payment_types &&
-    dictionaries.retailcrm_payment_types.length > 0
-      ? dictionaries.retailcrm_payment_types
-      : [
-          { code: "cash", name: "Наличные" },
-          { code: "bank-card", name: "Банковская карта" },
-          { code: "oplachen", name: "Оплачен (предоплата)" },
-        ];
-
-  const komtetStaffList =
-    dictionaries?.komtet_couriers && dictionaries.komtet_couriers.length > 0
-      ? dictionaries.komtet_couriers
-      : dictionaries?.komtet_employees || [];
-
-  const crmCouriersList = [
-    ...(dictionaries?.retailcrm_couriers.map((c) => ({
-      code: String(c.id),
-      name:
-        [c.lastName, c.firstName, c.patronymic]
-          .filter(Boolean)
-          .join(" ")
-          .trim() || `Курьер #${c.id}`,
-      active: c.active !== false,
-      isCustom: false,
-    })) || []),
-    ...customCouriers.map((c) => ({
-      code: c.code,
-      name: c.name,
-      active: true,
-      isCustom: true,
-    })),
-  ];
+  const canSave = !saving && !loadingDicts && loadedOk && Boolean(settings);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5 sm:space-y-6">
       {/* Верхняя панель обновления справочников */}
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div>
+      <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
           <h2 className="text-base font-semibold text-slate-900">
             Справочники API и сопоставление сущностей
           </h2>
@@ -352,7 +487,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
           type="button"
           onClick={() => void loadData()}
           disabled={loadingDicts}
-          className="inline-flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+          className="inline-flex w-full shrink-0 items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60 sm:w-auto"
         >
           <RefreshCw
             className={`h-4 w-4 text-blue-600 ${loadingDicts ? "animate-spin" : ""}`}
@@ -366,11 +501,11 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
         <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
           <div className="flex items-start gap-2.5">
             <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
-            <div className="space-y-1">
+            <div className="min-w-0 space-y-1">
               <div className="font-semibold">
                 Предупреждения при загрузке справочников API:
               </div>
-              <ul className="list-inside list-disc space-y-1 text-xs">
+              <ul className="list-inside list-disc space-y-1 break-words text-xs">
                 {dictionaries.warnings.map((w, idx) => (
                   <li key={idx}>{w}</li>
                 ))}
@@ -381,9 +516,9 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
       )}
 
       {errorMsg && (
-        <div className="flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
-          <XCircle className="h-5 w-5 shrink-0 text-red-600" />
-          <span>{errorMsg}</span>
+        <div className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+          <XCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-600" />
+          <span className="min-w-0 break-words">{errorMsg}</span>
         </div>
       )}
 
@@ -395,7 +530,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
       )}
 
       {/* Секция 1: Статусы заказов RetailCRM */}
-      <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
         <h3 className="text-base font-semibold text-slate-900">
           1. Статусы заказов RetailCRM
         </h3>
@@ -403,7 +538,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
           Выберите статусы, при переходе в которые заказ выгружается в КОМТЕТ, отменяется или закрывается после пробития чека
         </p>
 
-        <div className="mt-4 grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <div className="mt-4 grid grid-cols-1 gap-5 sm:gap-6 lg:grid-cols-2">
           {/* Триггерные статусы */}
           <div>
             <div className="mb-2 flex items-center justify-between">
@@ -411,19 +546,19 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                 Триггерные статусы отправки в КОМТЕТ ({triggerStatuses.length})
               </span>
             </div>
-            <div className="max-h-60 space-y-1.5 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50/50 p-3">
+            <div className="max-h-60 space-y-1.5 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50/50 p-2.5 sm:p-3">
               {statusesList.map((st) => {
                 const checked = triggerStatuses.includes(st.code);
                 return (
                   <label
                     key={st.code}
-                    className={`flex cursor-pointer items-center justify-between rounded-lg px-2.5 py-1.5 text-xs transition ${
+                    className={`flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-xs transition sm:py-1.5 ${
                       checked
                         ? "bg-blue-50 font-medium text-blue-900"
-                        : "hover:bg-slate-100 text-slate-700"
+                        : "text-slate-700 hover:bg-slate-100"
                     }`}
                   >
-                    <div className="flex items-center gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
                       <input
                         type="checkbox"
                         checked={checked}
@@ -434,11 +569,11 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                             setTriggerStatuses,
                           )
                         }
-                        className="h-4 w-4 rounded border-slate-300 text-blue-600"
+                        className="h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600"
                       />
-                      <span>{st.name}</span>
+                      <span className="truncate">{st.name}</span>
                     </div>
-                    <span className="font-mono text-[11px] text-slate-400">
+                    <span className="shrink-0 font-mono text-[11px] text-slate-400">
                       {st.code}
                     </span>
                   </label>
@@ -454,19 +589,19 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                 Статусы отмены заказа в КОМТЕТ ({cancelStatuses.length})
               </span>
             </div>
-            <div className="max-h-60 space-y-1.5 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50/50 p-3">
+            <div className="max-h-60 space-y-1.5 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50/50 p-2.5 sm:p-3">
               {statusesList.map((st) => {
                 const checked = cancelStatuses.includes(st.code);
                 return (
                   <label
                     key={st.code}
-                    className={`flex cursor-pointer items-center justify-between rounded-lg px-2.5 py-1.5 text-xs transition ${
+                    className={`flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-xs transition sm:py-1.5 ${
                       checked
                         ? "bg-red-50 font-medium text-red-900"
-                        : "hover:bg-slate-100 text-slate-700"
+                        : "text-slate-700 hover:bg-slate-100"
                     }`}
                   >
-                    <div className="flex items-center gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
                       <input
                         type="checkbox"
                         checked={checked}
@@ -477,11 +612,11 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                             setCancelStatuses,
                           )
                         }
-                        className="h-4 w-4 rounded border-slate-300 text-red-600"
+                        className="h-4 w-4 shrink-0 rounded border-slate-300 text-red-600"
                       />
-                      <span>{st.name}</span>
+                      <span className="truncate">{st.name}</span>
                     </div>
-                    <span className="font-mono text-[11px] text-slate-400">
+                    <span className="shrink-0 font-mono text-[11px] text-slate-400">
                       {st.code}
                     </span>
                   </label>
@@ -510,8 +645,8 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
         </div>
       </div>
 
-      {/* Секция 2: Таблица маппинга Курьеров */}
-      <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+      {/* Секция 2: Таблица / карточки маппинга Курьеров */}
+      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h3 className="text-base font-semibold text-slate-900">
@@ -523,7 +658,118 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
           </div>
         </div>
 
-        <div className="mt-4 overflow-x-auto">
+        {/* Мобильные карточки (< md) */}
+        <div className="mt-4 space-y-3 md:hidden">
+          {crmCouriersList.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/70 px-4 py-6 text-center text-xs text-slate-500">
+              В справочнике RetailCRM пока нет курьеров. Добавьте связку вручную ниже.
+            </div>
+          ) : (
+            crmCouriersList.map((c) => {
+              const currentVal = courierMap[c.code] || "";
+              const isValid = isValidKomtetCourierId(currentVal);
+              return (
+                <div
+                  key={c.code}
+                  className="space-y-3 rounded-xl border border-slate-200 bg-slate-50/60 p-3.5"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                        RetailCRM
+                      </div>
+                      <div className="truncate text-sm font-semibold text-slate-900">
+                        {c.name}
+                      </div>
+                      <div className="font-mono text-xs text-slate-500">
+                        ID: {c.code}
+                      </div>
+                    </div>
+                    {c.isCustom && (
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveCustomCourier(c.code)}
+                        className="rounded-lg p-2 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                        title="Удалить строку"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-blue-600">
+                    <ArrowRight className="h-3.5 w-3.5" />
+                    КОМТЕТ Касса
+                  </div>
+
+                  <div className="space-y-2.5">
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-slate-600">
+                        Сотрудник в КОМТЕТ (из списка)
+                      </label>
+                      <select
+                        value={
+                          komtetStaffList.some(
+                            (emp) => String(emp.id) === currentVal,
+                          )
+                            ? currentVal
+                            : ""
+                        }
+                        onChange={(e) =>
+                          setCourierMap({
+                            ...courierMap,
+                            [c.code]: e.target.value,
+                          })
+                        }
+                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-600 focus:outline-none"
+                      >
+                        <option value="">— Не выбран / Ввод вручную —</option>
+                        {komtetStaffList.map((emp) => (
+                          <option key={String(emp.id)} value={String(emp.id)}>
+                            {emp.name} (ID: {emp.id}
+                            {emp.type ? `, ${emp.type}` : ""})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-slate-600">
+                        ID курьера КОМТЕТ (вручную)
+                      </label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        value={currentVal}
+                        onChange={(e) =>
+                          setCourierMap({
+                            ...courierMap,
+                            [c.code]: e.target.value,
+                          })
+                        }
+                        placeholder="Числовой ID курьера КОМТЕТ"
+                        className={`w-full rounded-lg border bg-white px-3 py-2 font-mono text-sm focus:outline-none ${
+                          isValid
+                            ? "border-slate-300 focus:border-blue-600"
+                            : "border-red-400 bg-red-50/40 focus:border-red-500"
+                        }`}
+                      />
+                      {!isValid && (
+                        <p className="mt-1 text-[11px] text-red-600">
+                          Укажите целое положительное число
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        {/* Десктопная таблица (md+) */}
+        <div className="mt-4 hidden overflow-x-auto md:block">
           <table className="w-full border-collapse text-left text-sm">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
@@ -546,6 +792,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
               ) : (
                 crmCouriersList.map((c) => {
                   const currentVal = courierMap[c.code] || "";
+                  const isValid = isValidKomtetCourierId(currentVal);
                   return (
                     <tr key={c.code} className="hover:bg-slate-50/70">
                       <td className="px-4 py-2.5">
@@ -585,6 +832,8 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                       <td className="px-4 py-2.5">
                         <input
                           type="text"
+                          inputMode="numeric"
+                          pattern="[0-9]*"
                           value={currentVal}
                           onChange={(e) =>
                             setCourierMap({
@@ -593,8 +842,17 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                             })
                           }
                           placeholder="Числовой ID курьера КОМТЕТ"
-                          className="w-full rounded-lg border border-slate-300 px-3 py-1.5 font-mono text-xs focus:border-blue-600 focus:outline-none"
+                          className={`w-full rounded-lg border px-3 py-1.5 font-mono text-xs focus:outline-none ${
+                            isValid
+                              ? "border-slate-300 focus:border-blue-600"
+                              : "border-red-400 bg-red-50/40 focus:border-red-500"
+                          }`}
                         />
+                        {!isValid && (
+                          <div className="mt-1 text-[11px] text-red-600">
+                            Только целое положительное число
+                          </div>
+                        )}
                       </td>
                       <td className="px-2 py-2.5 text-right">
                         {c.isCustom && (
@@ -617,25 +875,26 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
         </div>
 
         {/* Добавление курьера вручную */}
-        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
+        <div className="mt-4 grid grid-cols-1 gap-2 border-t border-slate-100 pt-3 sm:flex sm:flex-wrap sm:items-center">
           <input
             type="text"
+            inputMode="numeric"
             value={newCourierCode}
             onChange={(e) => setNewCourierCode(e.target.value)}
             placeholder="ID курьера в RetailCRM"
-            className="w-44 rounded-lg border border-slate-300 px-3 py-1.5 text-xs focus:border-blue-600 focus:outline-none"
+            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs focus:border-blue-600 focus:outline-none sm:w-44 sm:py-1.5"
           />
           <input
             type="text"
             value={newCourierName}
             onChange={(e) => setNewCourierName(e.target.value)}
             placeholder="Имя курьера (опционально)"
-            className="w-56 rounded-lg border border-slate-300 px-3 py-1.5 text-xs focus:border-blue-600 focus:outline-none"
+            className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs focus:border-blue-600 focus:outline-none sm:w-56 sm:py-1.5"
           />
           <button
             type="button"
             onClick={handleAddCustomCourier}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+            className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 sm:w-auto sm:py-1.5"
           >
             <Plus className="h-3.5 w-3.5" />
             Добавить курьера вручную
@@ -644,9 +903,9 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
       </div>
 
       {/* Секция 3 и 4: Типы оплат и Ставки НДС */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {/* Таблица маппинга Типов оплат */}
-        <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+      <div className="grid grid-cols-1 gap-5 sm:gap-6 lg:grid-cols-2">
+        {/* Типы оплат */}
+        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
           <h3 className="text-base font-semibold text-slate-900">
             3. Маппинг типов оплат
           </h3>
@@ -654,7 +913,49 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
             Сопоставление способов оплаты RetailCRM с типами расчетов КОМТЕТ Кассы
           </p>
 
-          <div className="mt-4 overflow-x-auto">
+          {/* Мобильные карточки (< md) */}
+          <div className="mt-4 space-y-2.5 md:hidden">
+            {paymentTypesList.map((pt) => (
+              <div
+                key={pt.code}
+                className="space-y-2 rounded-xl border border-slate-200 bg-slate-50/60 p-3.5"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium text-slate-900">
+                      {pt.name}
+                    </div>
+                    <div className="font-mono text-xs text-slate-500">
+                      {pt.code}
+                    </div>
+                  </div>
+                  <span className="shrink-0 rounded-full bg-slate-200/70 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                    RetailCRM → КОМТЕТ
+                  </span>
+                </div>
+                <select
+                  value={paymentMap[pt.code] || ""}
+                  onChange={(e) =>
+                    setPaymentMap({
+                      ...paymentMap,
+                      [pt.code]: e.target.value,
+                    })
+                  }
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-600 focus:outline-none"
+                >
+                  <option value="">— По умолчанию (card) —</option>
+                  {KOMTET_PAYMENT_OPTIONS.map((opt) => (
+                    <option key={opt.code} value={opt.code}>
+                      {opt.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
+          </div>
+
+          {/* Десктопная таблица (md+) */}
+          <div className="mt-4 hidden overflow-x-auto md:block">
             <table className="w-full border-collapse text-left text-sm">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
@@ -699,16 +1000,68 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
           </div>
         </div>
 
-        {/* Таблица маппинга Ставок НДС */}
-        <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+        {/* Ставки НДС */}
+        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
           <h3 className="text-base font-semibold text-slate-900">
             4. Маппинг ставок НДС
           </h3>
           <p className="mt-0.5 text-xs text-slate-500">
-            Поддержка ставок НДС 22%, 20%, 10%, 0% и «Без НДС» по 54-ФЗ
+            Поддержка ставок НДС 22%, 20%, 10%, 7%, 5%, 0%, расчётных ставок и «Без НДС» по 54-ФЗ
           </p>
 
-          <div className="mt-4 overflow-x-auto">
+          {/* Мобильные карточки (< md) */}
+          <div className="mt-4 space-y-2.5 md:hidden">
+            {vatRowsList.map((row) => {
+              const selectedVat = vatMap[row.crmCode] || row.komtetCode;
+              const options = KOMTET_VAT_OPTIONS.some(
+                (o) => o.code === selectedVat,
+              )
+                ? KOMTET_VAT_OPTIONS
+                : [
+                    ...KOMTET_VAT_OPTIONS,
+                    { code: selectedVat, name: selectedVat },
+                  ];
+              return (
+                <div
+                  key={row.crmCode}
+                  className="space-y-2 rounded-xl border border-slate-200 bg-slate-50/60 p-3.5"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium text-slate-900">
+                        {row.crmName}
+                      </div>
+                      <div className="font-mono text-xs text-slate-500">
+                        код: {row.crmCode}
+                      </div>
+                    </div>
+                    <span className="shrink-0 rounded-full bg-slate-200/70 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                      RetailCRM → КОМТЕТ
+                    </span>
+                  </div>
+                  <select
+                    value={selectedVat}
+                    onChange={(e) =>
+                      setVatMap({
+                        ...vatMap,
+                        [row.crmCode]: e.target.value,
+                      })
+                    }
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-600 focus:outline-none"
+                  >
+                    {options.map((opt) => (
+                      <option key={opt.code} value={opt.code}>
+                        {opt.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Десктопная таблица (md+) */}
+          <div className="mt-4 hidden overflow-x-auto md:block">
             <table className="w-full border-collapse text-left text-sm">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
@@ -717,36 +1070,47 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {DEFAULT_VAT_ROWS.map((row) => (
-                  <tr key={row.crmCode} className="hover:bg-slate-50/70">
-                    <td className="px-3 py-2.5">
-                      <div className="font-medium text-slate-900">
-                        {row.crmName}
-                      </div>
-                      <div className="font-mono text-xs text-slate-400">
-                        код: {row.crmCode}
-                      </div>
-                    </td>
-                    <td className="px-3 py-2.5">
-                      <select
-                        value={vatMap[row.crmCode] || row.komtetCode}
-                        onChange={(e) =>
-                          setVatMap({
-                            ...vatMap,
-                            [row.crmCode]: e.target.value,
-                          })
-                        }
-                        className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs focus:border-blue-600 focus:outline-none"
-                      >
-                        {KOMTET_VAT_OPTIONS.map((opt) => (
-                          <option key={opt.code} value={opt.code}>
-                            {opt.name}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                  </tr>
-                ))}
+                {vatRowsList.map((row) => {
+                  const selectedVat = vatMap[row.crmCode] || row.komtetCode;
+                  const options = KOMTET_VAT_OPTIONS.some(
+                    (o) => o.code === selectedVat,
+                  )
+                    ? KOMTET_VAT_OPTIONS
+                    : [
+                        ...KOMTET_VAT_OPTIONS,
+                        { code: selectedVat, name: selectedVat },
+                      ];
+                  return (
+                    <tr key={row.crmCode} className="hover:bg-slate-50/70">
+                      <td className="px-3 py-2.5">
+                        <div className="font-medium text-slate-900">
+                          {row.crmName}
+                        </div>
+                        <div className="font-mono text-xs text-slate-400">
+                          код: {row.crmCode}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <select
+                          value={selectedVat}
+                          onChange={(e) =>
+                            setVatMap({
+                              ...vatMap,
+                              [row.crmCode]: e.target.value,
+                            })
+                          }
+                          className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs focus:border-blue-600 focus:outline-none"
+                        >
+                          {options.map((opt) => (
+                            <option key={opt.code} value={opt.code}>
+                              {opt.name}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -754,12 +1118,12 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
       </div>
 
       {/* Кнопка сохранения */}
-      <div className="flex items-center gap-3">
+      <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center">
         <button
           type="button"
           onClick={() => void handleSaveAll()}
-          disabled={saving}
-          className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-60"
+          disabled={!canSave}
+          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
         >
           {saving ? (
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -770,8 +1134,12 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
         </button>
 
         <div className="inline-flex items-center gap-1.5 text-xs text-slate-500">
-          <GitCompareArrows className="h-4 w-4 text-slate-400" />
-          Изменения применяются мгновенно для всех новых синхронизаций
+          <GitCompareArrows className="h-4 w-4 shrink-0 text-slate-400" />
+          <span>
+            {!loadedOk && !loadingDicts
+              ? "Сохранение недоступно до успешной загрузки справочников и маппинга"
+              : "Изменения применяются мгновенно для всех новых синхронизаций"}
+          </span>
         </div>
       </div>
     </div>

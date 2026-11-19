@@ -247,11 +247,14 @@ async def load_runtime_config(
     rows = (await session.execute(select(Setting))).scalars().all()
     db_map = {row.key: row for row in rows}
 
-    def get_val(key: str, env_fallback: Any = None) -> Any:
+    def get_val(key: str, env_fallback: Any = None, *, trust_db_null: bool = False) -> Any:
         value_type, _, _, default_val = SETTING_DEFINITIONS[key]
         row = db_map.get(key)
-        if row is not None and row.value is not None and row.value != "":
-            return _deserialize_setting_value(row.value, value_type, default_val)
+        if row is not None:
+            if row.value is not None and row.value != "":
+                return _deserialize_setting_value(row.value, value_type, default_val)
+            if trust_db_null:
+                return default_val
         if env_fallback not in (None, ""):
             return env_fallback
         return default_val
@@ -280,7 +283,7 @@ async def load_runtime_config(
         komtet_secret_key=str(
             get_val("komtet_secret_key", env.komtet_secret_key.get_secret_value())
         ),
-        komtet_queue_id=get_val("komtet_queue_id", env.komtet_queue_id),
+        komtet_queue_id=get_val("komtet_queue_id", env.komtet_queue_id, trust_db_null=True),
         komtet_api_version=api_version,
         tax_system=int(get_val("tax_system")),
         default_vat=str(get_val("default_vat")),
@@ -363,7 +366,7 @@ async def update_settings(
     env_settings: Optional[Settings] = None,
 ) -> SettingsResponse:
     """Persist settings updates to DB without overwriting secrets with masked placeholders."""
-    updates = payload.model_dump(exclude_none=True)
+    updates = payload.model_dump(exclude_unset=True)
     if not updates:
         return await get_settings_response(session, env_settings=env_settings)
 
@@ -381,11 +384,18 @@ async def update_settings(
         value_type, is_secret, description, _ = SETTING_DEFINITIONS[key]
 
         if is_secret:
+            if new_val is None:
+                continue
             str_val = str(new_val).strip()
             # Skip masked placeholder or blank submission so existing key stays intact.
             if not str_val or str_val.startswith("****"):
                 continue
             new_val = str_val
+        elif key == "komtet_queue_id":
+            if new_val is not None and int(new_val) <= 0:
+                raise ValueError("komtet_queue_id must be a positive integer or null")
+        elif new_val is None:
+            continue
         elif key in {"retailcrm_url", "komtet_base_url", "komtet_callback_url"}:
             new_val = validate_outbound_url(
                 str(new_val),

@@ -136,19 +136,19 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-4">
+    <div className="space-y-5 sm:space-y-6">
+      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <h2 className="text-base font-semibold text-slate-900">
               Журнал событий синхронизации ({total})
             </h2>
             <p className="text-xs text-slate-500">
-              Кликните на любую строку журнала для просмотра JSON-пейлоада и деталей события
+              Кликните на любую запись журнала для просмотра JSON-пейлоада и деталей события
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5">
+          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:flex lg:flex-wrap lg:items-center">
             {/* Фильтр по статусу */}
             <select
               value={statusFilter}
@@ -156,7 +156,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
                 setStatusFilter(e.target.value);
                 setOffset(0);
               }}
-              className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-blue-600 focus:outline-none"
+              className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs focus:border-blue-600 focus:outline-none lg:w-auto lg:py-1.5"
             >
               <option value="all">Статус: Все (all)</option>
               <option value="success">Успешные (success)</option>
@@ -171,7 +171,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
                 setDirectionFilter(e.target.value);
                 setOffset(0);
               }}
-              className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-blue-600 focus:outline-none"
+              className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs focus:border-blue-600 focus:outline-none lg:w-auto lg:py-1.5"
             >
               <option value="all">Направление: Все (all)</option>
               <option value="retailcrm_to_komtet">
@@ -183,21 +183,25 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
             </select>
 
             {/* Поиск по order_id */}
-            <form onSubmit={handleOrderSearch} className="flex items-center">
-              <div className="relative">
-                <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-slate-400" />
+            <form
+              onSubmit={handleOrderSearch}
+              className="flex w-full items-stretch lg:w-auto"
+            >
+              <div className="relative min-w-0 flex-1">
+                <Search className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-slate-400 lg:top-2" />
                 <input
                   type="number"
                   min={1}
+                  inputMode="numeric"
                   value={orderIdInput}
                   onChange={(e) => setOrderIdInput(e.target.value)}
                   placeholder="Поиск по ID заказа..."
-                  className="w-44 rounded-l-xl border border-slate-300 py-1.5 pl-8 pr-2.5 text-xs focus:border-blue-600 focus:outline-none"
+                  className="w-full rounded-l-xl border border-slate-300 py-2 pl-8 pr-2.5 text-xs focus:border-blue-600 focus:outline-none lg:w-44 lg:py-1.5"
                 />
               </div>
               <button
                 type="submit"
-                className="rounded-r-xl border border-l-0 border-slate-300 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                className="shrink-0 rounded-r-xl border border-l-0 border-slate-300 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 lg:py-1.5"
               >
                 Найти
               </button>
@@ -208,7 +212,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
               type="button"
               onClick={() => void loadLogs()}
               disabled={loading}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+              className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60 lg:w-auto lg:py-1.5"
             >
               <RefreshCw
                 className={`h-3.5 w-3.5 text-blue-600 ${loading ? "animate-spin" : ""}`}
@@ -224,7 +228,109 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
           </div>
         )}
 
-        <div className="mt-4 overflow-x-auto">
+        {/* Мобильные карточки (< md) */}
+        <div className="mt-4 space-y-3 md:hidden">
+          {logs.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/70 px-4 py-8 text-center text-xs text-slate-500">
+              {loading
+                ? "Загрузка журнала..."
+                : "Записей, подходящих под выбранные фильтры, не найдено"}
+            </div>
+          ) : (
+            logs.map((log) => {
+              const isExpanded = expandedId === log.id;
+              return (
+                <div
+                  key={log.id}
+                  onClick={() => setExpandedId(isExpanded ? null : log.id)}
+                  className="min-w-0 cursor-pointer overflow-hidden rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm transition hover:border-slate-300"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {getLogBadge(log)}
+                      <span className="text-[11px] text-slate-500">
+                        {formatDateTime(log.created_at)}
+                      </span>
+                    </div>
+                    <span className="shrink-0 text-slate-400">
+                      {isExpanded ? (
+                        <ChevronUp className="h-4 w-4" />
+                      ) : (
+                        <ChevronDown className="h-4 w-4" />
+                      )}
+                    </span>
+                  </div>
+
+                  <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                    <span className="inline-flex items-center gap-1 font-medium text-slate-700">
+                      <ArrowLeftRight className="h-3.5 w-3.5 text-slate-400" />
+                      {getDirectionLabel(log.direction)}
+                    </span>
+                    <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-700">
+                      {log.event_type}
+                    </span>
+                    {(log.retailcrm_order_id || log.komtet_order_id) && (
+                      <span className="font-mono text-[11px] font-medium text-slate-600">
+                        {log.retailcrm_order_id
+                          ? `CRM #${log.retailcrm_order_id}`
+                          : "—"}
+                        {log.komtet_order_id
+                          ? ` / K #${log.komtet_order_id}`
+                          : ""}
+                      </span>
+                    )}
+                  </div>
+
+                  <div
+                    className={`mt-2 break-words text-xs text-slate-800 ${
+                      isExpanded ? "" : "line-clamp-2"
+                    }`}
+                  >
+                    {log.message}
+                  </div>
+
+                  {isExpanded && (
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      className="mt-3 space-y-2.5 border-t border-slate-100 pt-3 text-xs"
+                    >
+                      {log.error_details && (
+                        <div>
+                          <div className="font-semibold text-red-700">
+                            Детали ошибки:
+                          </div>
+                          <pre className="mt-1 max-w-full overflow-x-auto rounded-lg border border-red-200 bg-red-50 p-2.5 font-mono text-[11px] text-red-900">
+                            {log.error_details}
+                          </pre>
+                        </div>
+                      )}
+
+                      {log.payload && (
+                        <div>
+                          <div className="font-semibold text-slate-700">
+                            JSON Payload:
+                          </div>
+                          <pre className="mt-1 max-h-80 max-w-full overflow-auto rounded-lg border border-slate-200 bg-slate-900 p-2.5 font-mono text-[11px] text-slate-100">
+                            {JSON.stringify(log.payload, null, 2)}
+                          </pre>
+                        </div>
+                      )}
+
+                      {!log.error_details && !log.payload && (
+                        <div className="text-[11px] text-slate-400">
+                          Дополнительный JSON payload отсутствует.
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        {/* Десктопная таблица (md+) */}
+        <div className="mt-4 hidden overflow-x-auto md:block">
           <table className="w-full border-collapse text-left text-sm">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
@@ -301,7 +407,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
                                 <div className="font-semibold text-slate-700">
                                   Полный текст сообщения:
                                 </div>
-                                <div className="mt-1 rounded-lg border border-slate-200 bg-white p-2.5 text-slate-800">
+                                <div className="mt-1 break-words rounded-lg border border-slate-200 bg-white p-2.5 text-slate-800">
                                   {log.message}
                                 </div>
                               </div>
@@ -311,7 +417,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
                                   <div className="font-semibold text-red-700">
                                     Детали ошибки:
                                   </div>
-                                  <pre className="mt-1 overflow-x-auto rounded-lg border border-red-200 bg-red-50 p-2.5 font-mono text-[11px] text-red-900">
+                                  <pre className="mt-1 max-w-full overflow-x-auto rounded-lg border border-red-200 bg-red-50 p-2.5 font-mono text-[11px] text-red-900">
                                     {log.error_details}
                                   </pre>
                                 </div>
@@ -322,7 +428,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
                                   <div className="font-semibold text-slate-700">
                                     JSON Payload:
                                   </div>
-                                  <pre className="mt-1 max-h-80 overflow-auto rounded-lg border border-slate-200 bg-slate-900 p-3 font-mono text-[11px] text-slate-100">
+                                  <pre className="mt-1 max-h-80 max-w-full overflow-auto rounded-lg border border-slate-200 bg-slate-900 p-3 font-mono text-[11px] text-slate-100">
                                     {JSON.stringify(log.payload, null, 2)}
                                   </pre>
                                 </div>
@@ -341,7 +447,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
 
         {/* Пагинация */}
         {total > PAGE_LIMIT && (
-          <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-xs text-slate-600">
+          <div className="mt-4 flex flex-col gap-2 border-t border-slate-100 pt-3 text-xs text-slate-600 sm:flex-row sm:items-center sm:justify-between">
             <div>
               Показано {offset + 1}–{Math.min(offset + PAGE_LIMIT, total)} из{" "}
               {total}
@@ -351,7 +457,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
                 type="button"
                 disabled={offset === 0 || loading}
                 onClick={() => setOffset(Math.max(0, offset - PAGE_LIMIT))}
-                className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-2.5 py-1 hover:bg-slate-50 disabled:opacity-40"
+                className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg border border-slate-300 px-3 py-1.5 hover:bg-slate-50 disabled:opacity-40 sm:flex-none sm:py-1"
               >
                 <ChevronLeft className="h-3.5 w-3.5" />
                 Назад
@@ -360,7 +466,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
                 type="button"
                 disabled={offset + PAGE_LIMIT >= total || loading}
                 onClick={() => setOffset(offset + PAGE_LIMIT)}
-                className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-2.5 py-1 hover:bg-slate-50 disabled:opacity-40"
+                className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg border border-slate-300 px-3 py-1.5 hover:bg-slate-50 disabled:opacity-40 sm:flex-none sm:py-1"
               >
                 Вперед
                 <ChevronRight className="h-3.5 w-3.5" />

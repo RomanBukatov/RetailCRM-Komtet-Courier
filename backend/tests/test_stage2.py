@@ -1613,3 +1613,174 @@ async def test_webhooks_http_503_retry_hmac_before_factory_proxy_ports_and_form_
             assert log_row.payload["trigger_event"] == "order_edit"
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_utc_datetime_serialization_courier_validation_and_clear_queue_id(
+    tmp_path: Path,
+) -> None:
+    """Verify naive SQLite datetimes serialize as UTC ISO, courier komtet_code validation, and komtet_queue_id=None."""
+    from pydantic import ValidationError
+    from app.schemas import (
+        MappingItemSchema,
+        OrderSyncItemSchema,
+        SettingItemSchema,
+        SyncLogItemSchema,
+    )
+
+    # 1) Direct schema UTC serialization for naive datetimes (as returned by SQLite)
+    naive_dt = datetime(2026, 11, 19, 10, 30, 45)
+    setting_schema = SettingItemSchema(
+        key="default_vat", value="22", value_type="string", updated_at=naive_dt
+    )
+    log_schema = SyncLogItemSchema(
+        id=1,
+        direction="crm_to_komtet",
+        level="INFO",
+        event_type="order_create",
+        message="ok",
+        created_at=naive_dt,
+    )
+    order_schema = OrderSyncItemSchema(
+        id=1,
+        retailcrm_order_id=10,
+        sync_status="synced",
+        last_synced_at=naive_dt,
+        last_komtet_callback_at=naive_dt,
+        updated_at=naive_dt,
+    )
+
+    for iso_str in (
+        setting_schema.model_dump(mode="json")["updated_at"],
+        log_schema.model_dump(mode="json")["created_at"],
+        order_schema.model_dump(mode="json")["last_synced_at"],
+        order_schema.model_dump(mode="json")["last_komtet_callback_at"],
+        order_schema.model_dump(mode="json")["updated_at"],
+    ):
+        assert isinstance(iso_str, str)
+        assert iso_str.endswith("Z") or iso_str.endswith("+00:00")
+        assert datetime.fromisoformat(iso_str).utcoffset() == timedelta(0)
+
+    # 2) MappingItemSchema validation for courier komtet_code
+    valid_courier = MappingItemSchema(
+        mapping_type="courier", retailcrm_code="5", komtet_code=" 701 "
+    )
+    assert valid_courier.komtet_code == "701"
+
+    empty_courier = MappingItemSchema(
+        mapping_type="courier", retailcrm_code="5", komtet_code=""
+    )
+    assert empty_courier.komtet_code == ""
+
+    non_courier = MappingItemSchema(
+        mapping_type="payment_type", retailcrm_code="cash", komtet_code="cash"
+    )
+    assert non_courier.komtet_code == "cash"
+
+    for bad_code in ("abc", "0", "-5", "12.5", "701a"):
+        with pytest.raises(ValidationError):
+            MappingItemSchema(
+                mapping_type="courier", retailcrm_code="5", komtet_code=bad_code
+            )
+
+    # 3) HTTP-level checks: clearing komtet_queue_id=None, 422 on invalid courier, UTC timestamps in JSON
+    db_url = f"sqlite+aiosqlite:///{(tmp_path / 'preprod.db').as_posix()}"
+    engine = create_engine(db_url)
+    test_settings = _test_env_settings(komtet_queue_id=12345)
+    await init_db(engine, seed=True, env_settings=test_settings)
+    session_maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async with session_maker() as seed_db:
+        seed_db.add(
+            OrderSync(
+                retailcrm_order_id=4242,
+                sync_status="synced",
+                last_synced_at=naive_dt,
+                last_komtet_callback_at=naive_dt,
+                updated_at=naive_dt,
+            )
+        )
+        seed_db.add(
+            SyncLog(
+                direction="crm_to_komtet",
+                level="INFO",
+                event_type="test_utc",
+                retailcrm_order_id=4242,
+                message="UTC check",
+                created_at=naive_dt,
+            )
+        )
+        await seed_db.commit()
+
+    app = create_app(test_settings)
+
+    async def override_get_db():
+        async with session_maker() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        # Initially seeded from env_settings
+        r_init = await client.get("/api/v1/settings")
+        assert r_init.status_code == 200
+        assert r_init.json()["komtet_queue_id"] == 12345
+        for item in r_init.json()["items"]:
+            if item["updated_at"] is not None:
+                assert item["updated_at"].endswith("Z") or item["updated_at"].endswith("+00:00")
+
+        # Explicitly clear komtet_queue_id to null
+        r_clear = await client.put("/api/v1/settings", json={"komtet_queue_id": None})
+        assert r_clear.status_code == 200
+        assert r_clear.json()["komtet_queue_id"] is None
+
+        # Verify DB value is NULL and runtime config respects NULL despite env_settings=12345
+        async with session_maker() as check_db:
+            q_row = await check_db.scalar(
+                select(Setting).where(Setting.key == "komtet_queue_id")
+            )
+            assert q_row is not None
+            assert q_row.value is None
+            cfg = await load_runtime_config(check_db, env_settings=test_settings)
+            assert cfg.komtet_queue_id is None
+
+        # Partial update without komtet_queue_id keeps it None; setting int restores it
+        r_partial = await client.put("/api/v1/settings", json={"default_vat": "10"})
+        assert r_partial.status_code == 200
+        assert r_partial.json()["komtet_queue_id"] is None
+
+        r_set_q = await client.put("/api/v1/settings", json={"komtet_queue_id": 54321})
+        assert r_set_q.status_code == 200
+        assert r_set_q.json()["komtet_queue_id"] == 54321
+
+        # Invalid courier komtet_code rejected with 422
+        r_bad_map = await client.put(
+            "/api/v1/mappings",
+            json={
+                "items": [
+                    {
+                        "mapping_type": "courier",
+                        "retailcrm_code": "10",
+                        "komtet_code": "not-a-number",
+                    }
+                ],
+                "replace_types": [],
+            },
+        )
+        assert r_bad_map.status_code == 422
+
+        # Logs and orders-sync endpoints return UTC ISO timestamps
+        r_logs = await client.get("/api/v1/logs?order_id=4242")
+        assert r_logs.status_code == 200
+        created_at_iso = r_logs.json()["items"][0]["created_at"]
+        assert created_at_iso.endswith("Z") or created_at_iso.endswith("+00:00")
+
+        r_orders = await client.get("/api/v1/orders-sync")
+        assert r_orders.status_code == 200
+        ord_item = r_orders.json()["items"][0]
+        for field in ("last_synced_at", "last_komtet_callback_at", "updated_at"):
+            assert ord_item[field].endswith("Z") or ord_item[field].endswith("+00:00")
+
+    await engine.dispose()

@@ -4,18 +4,24 @@ from __future__ import annotations
 
 from datetime import timedelta, timezone, tzinfo
 from functools import lru_cache
+import json
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = BACKEND_DIR.parent
 DEFAULT_DB_PATH = (REPO_ROOT / "data" / "integration.db").as_posix()
 
 _MSK_FALLBACK_TZ = timezone(timedelta(hours=3))
+DEFAULT_DEV_CORS_ORIGINS: tuple[str, ...] = (
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+)
 
 
 def get_app_timezone(tz_name: str = "Europe/Moscow") -> tzinfo:
@@ -40,12 +46,11 @@ class Settings(BaseSettings):
     app_env: Literal["development", "staging", "production", "test"] = "development"
     app_timezone: str = "Europe/Moscow"
     log_level: str = "INFO"
+    log_retention_days: int = 30
     http_timeout_seconds: float = 15.0
-    cors_origins: list[str] = [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-    ]
+    cors_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(DEFAULT_DEV_CORS_ORIGINS)
+    )
 
     database_url: str = f"sqlite+aiosqlite:///{DEFAULT_DB_PATH}"
 
@@ -94,6 +99,33 @@ class Settings(BaseSettings):
     @classmethod
     def _normalize_log_level(cls, value: object) -> str:
         return str(value or "INFO").strip().upper()
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _parse_cors_origins(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    return [str(item).strip() for item in parsed if str(item).strip()]
+            return [part.strip() for part in raw.split(",") if part.strip()]
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return []
+
+    @property
+    def effective_cors_origins(self) -> list[str]:
+        """Return configured CORS origins; disable dev localhost defaults in production."""
+        if "cors_origins" in self.model_fields_set:
+            return list(self.cors_origins)
+        if self.is_production:
+            return []
+        return list(self.cors_origins)
 
     @property
     def is_production(self) -> bool:

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+import asyncio
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import event
+from sqlalchemy import delete, event, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncAttrs,
@@ -59,7 +61,7 @@ def create_engine(database_url: str | None = None) -> AsyncEngine:
             cursor.execute("PRAGMA journal_mode=WAL;")
             cursor.execute("PRAGMA synchronous=NORMAL;")
             cursor.execute("PRAGMA foreign_keys=ON;")
-            cursor.execute("PRAGMA busy_timeout=5000;")
+            cursor.execute("PRAGMA busy_timeout=30000;")
             cursor.close()
 
     return async_engine
@@ -117,3 +119,59 @@ async def init_db(
         )
         async with session_maker() as session:
             await seed_defaults(session, env_settings=env_settings)
+
+
+_LOG_CLEANUP_BATCH_SIZE = 5000
+
+
+async def cleanup_old_logs(
+    retention_days: int,
+    target_engine: AsyncEngine | None = None,
+    *,
+    batch_size: int = _LOG_CLEANUP_BATCH_SIZE,
+) -> int:
+    """Delete sync_logs records older than retention_days in batches and compact SQLite WAL."""
+    if retention_days <= 0:
+        return 0
+
+    from app.models import SyncLog
+
+    active_engine = target_engine or engine
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    effective_batch = max(1, int(batch_size))
+
+    session_maker = async_sessionmaker(
+        bind=active_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+
+    deleted_count = 0
+    while True:
+        batch_ids = (
+            select(SyncLog.id)
+            .where(SyncLog.created_at < cutoff)
+            .limit(effective_batch)
+        )
+        stmt = (
+            delete(SyncLog)
+            .where(SyncLog.id.in_(batch_ids))
+            .execution_options(synchronize_session=False)
+        )
+        async with session_maker() as session:
+            result = await session.execute(stmt)
+            batch_deleted = int(result.rowcount or 0)
+            await session.commit()
+        deleted_count += batch_deleted
+        if batch_deleted < effective_batch:
+            break
+        await asyncio.sleep(0)
+
+    if active_engine.dialect.name == "sqlite":
+        async with active_engine.connect() as conn:
+            autocommit_conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await autocommit_conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE);")
+            await autocommit_conn.exec_driver_sql("PRAGMA optimize;")
+
+    return deleted_count

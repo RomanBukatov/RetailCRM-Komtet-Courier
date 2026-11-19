@@ -2,8 +2,10 @@ import React, { useCallback, useEffect, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Loader2,
   RefreshCw,
   Send,
@@ -83,6 +85,7 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
   const [statusFilter, setStatusFilter] = useState("");
+  const [expandedId, setExpandedId] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
 
@@ -149,9 +152,9 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5 sm:space-y-6">
       {/* Блок ручной отправки заказа */}
-      <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
         <h2 className="text-base font-semibold text-slate-900">
           Ручная синхронизация заказа из RetailCRM в КОМТЕТ Кассу
         </h2>
@@ -161,23 +164,24 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
 
         <form
           onSubmit={handleManualSync}
-          className="mt-4 flex flex-wrap items-center gap-3"
+          className="mt-4 grid grid-cols-1 gap-3 md:flex md:flex-wrap md:items-center"
         >
           <input
             type="number"
             min={1}
+            inputMode="numeric"
             value={manualOrderId}
             onChange={(e) => setManualOrderId(e.target.value)}
             placeholder="ID заказа RetailCRM (например: 1200)"
-            className="w-72 rounded-xl border border-slate-300 px-3.5 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+            className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20 md:w-72 md:py-2"
           />
 
-          <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-700">
+          <label className="flex cursor-pointer items-center gap-2 py-1 text-xs font-medium text-slate-700">
             <input
               type="checkbox"
               checked={ignoreStatusFilter}
               onChange={(e) => setIgnoreStatusFilter(e.target.checked)}
-              className="h-4 w-4 rounded border-slate-300 text-blue-600"
+              className="h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600"
             />
             Игнорировать фильтр триггерных статусов
           </label>
@@ -185,7 +189,7 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
           <button
             type="submit"
             disabled={syncingManual}
-            className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-60"
+            className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:opacity-60 md:w-auto md:py-2"
           >
             {syncingManual ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -197,9 +201,9 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
         </form>
 
         {manualError && (
-          <div className="mt-4 flex items-center gap-2.5 rounded-xl border border-red-200 bg-red-50 p-3.5 text-xs text-red-800">
-            <XCircle className="h-4 w-4 shrink-0 text-red-600" />
-            <span>{manualError}</span>
+          <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 p-3.5 text-xs text-red-800">
+            <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
+            <span className="min-w-0 break-words">{manualError}</span>
           </div>
         )}
 
@@ -217,7 +221,7 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
               ) : (
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
               )}
-              <div className="space-y-1">
+              <div className="min-w-0 space-y-1">
                 <div className="font-semibold">
                   Результат синхронизации заказа #
                   {manualResult.result.retailcrm_order_id}:{" "}
@@ -237,12 +241,12 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
                   </div>
                 )}
                 {manualResult.result.error && (
-                  <div className="text-red-800">
+                  <div className="break-words text-red-800">
                     Ошибка: {manualResult.result.error}
                   </div>
                 )}
                 {manualResult.result.warning && (
-                  <div className="text-amber-800">
+                  <div className="break-words text-amber-800">
                     Предупреждение: {manualResult.result.warning}
                   </div>
                 )}
@@ -252,26 +256,26 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
         )}
       </div>
 
-      {/* Таблица синхронизированных заказов */}
-      <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+      {/* Таблица / карточки синхронизированных заказов */}
+      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h3 className="text-base font-semibold text-slate-900">
               Синхронизированные заказы ({total})
             </h3>
             <p className="text-xs text-slate-500">
-              Двусторонняя связка заказов RetailCRM и КОМТЕТ Кассы
+              Двусторонняя связка заказов RetailCRM и КОМТЕТ Кассы. Нажмите на запись для просмотра подробностей.
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="grid grid-cols-1 gap-2 sm:flex sm:flex-wrap sm:items-center">
             <select
               value={statusFilter}
               onChange={(e) => {
                 setStatusFilter(e.target.value);
                 setOffset(0);
               }}
-              className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-blue-600 focus:outline-none"
+              className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs focus:border-blue-600 focus:outline-none sm:w-auto sm:py-1.5"
             >
               <option value="">Все статусы связки</option>
               <option value="synced">Синхронизирован (synced)</option>
@@ -285,7 +289,7 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
               type="button"
               onClick={() => void loadOrders(offset, statusFilter)}
               disabled={loading}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+              className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60 sm:w-auto sm:py-1.5"
             >
               <RefreshCw
                 className={`h-3.5 w-3.5 text-blue-600 ${loading ? "animate-spin" : ""}`}
@@ -301,10 +305,121 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
           </div>
         )}
 
-        <div className="mt-4 overflow-x-auto">
+        {/* Мобильные карточки (< md) */}
+        <div className="mt-4 space-y-3 md:hidden">
+          {orders.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/70 px-4 py-8 text-center text-xs text-slate-500">
+              {loading
+                ? "Загрузка заказов..."
+                : "Записей синхронизации заказов пока нет"}
+            </div>
+          ) : (
+            orders.map((ord) => {
+              const isExpanded = expandedId === ord.id;
+              return (
+                <div
+                  key={ord.id}
+                  onClick={() => setExpandedId(isExpanded ? null : ord.id)}
+                  className="min-w-0 cursor-pointer overflow-hidden rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm transition hover:border-slate-300"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 font-mono text-sm font-semibold text-slate-900">
+                        <span>CRM #{ord.retailcrm_order_id}</span>
+                        {ord.retailcrm_order_number &&
+                          ord.retailcrm_order_number !==
+                            String(ord.retailcrm_order_id) && (
+                            <span className="font-sans text-xs font-normal text-slate-500">
+                              (№{ord.retailcrm_order_number})
+                            </span>
+                          )}
+                      </div>
+                      {ord.retailcrm_site && (
+                        <div className="text-[11px] text-slate-400">
+                          {ord.retailcrm_site}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      {getSyncStatusBadge(ord.sync_status)}
+                      <span className="text-slate-400">
+                        {isExpanded ? (
+                          <ChevronUp className="h-4 w-4" />
+                        ) : (
+                          <ChevronDown className="h-4 w-4" />
+                        )}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="mt-2.5 grid grid-cols-2 gap-2 border-t border-slate-100 pt-2.5 text-xs">
+                    <div>
+                      <div className="text-[11px] text-slate-400">
+                        ID в КОМТЕТ
+                      </div>
+                      <div className="font-mono font-medium text-slate-800">
+                        {ord.komtet_order_id ? `#${ord.komtet_order_id}` : "—"}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-slate-400">
+                        Статус КОМТЕТ
+                      </div>
+                      <div className="font-mono text-slate-700">
+                        {ord.komtet_state || "—"}
+                      </div>
+                    </div>
+                    <div className="col-span-2">
+                      <div className="text-[11px] text-slate-400">Обновлен</div>
+                      <div className="text-slate-600">
+                        {formatDateTime(ord.updated_at)}
+                      </div>
+                    </div>
+                  </div>
+
+                  {ord.last_error && !isExpanded && (
+                    <div className="mt-2 line-clamp-2 rounded-lg bg-red-50 px-2.5 py-1.5 text-xs text-red-700">
+                      {ord.last_error}
+                    </div>
+                  )}
+
+                  {isExpanded && (
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      className="mt-3 space-y-2.5 border-t border-slate-100 pt-3 text-xs"
+                    >
+                      {ord.last_error && (
+                        <div>
+                          <div className="font-semibold text-red-700">
+                            Последняя ошибка:
+                          </div>
+                          <pre className="mt-1 max-w-full overflow-x-auto whitespace-pre-wrap break-words rounded-lg border border-red-200 bg-red-50 p-2.5 font-mono text-[11px] text-red-900">
+                            {ord.last_error}
+                          </pre>
+                        </div>
+                      )}
+                      <div>
+                        <div className="font-semibold text-slate-700">
+                          JSON связки заказа:
+                        </div>
+                        <pre className="mt-1 max-h-64 max-w-full overflow-auto rounded-lg border border-slate-200 bg-slate-900 p-2.5 font-mono text-[11px] text-slate-100">
+                          {JSON.stringify(ord, null, 2)}
+                        </pre>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        {/* Десктопная таблица (md+) */}
+        <div className="mt-4 hidden overflow-x-auto md:block">
           <table className="w-full border-collapse text-left text-sm">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
+                <th className="w-8 px-2 py-2.5"></th>
                 <th className="px-4 py-2.5">ID заказа RetailCRM</th>
                 <th className="px-4 py-2.5">ID заказа КОМТЕТ</th>
                 <th className="px-4 py-2.5">Статус синхронизации</th>
@@ -317,7 +432,7 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
               {orders.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={6}
+                    colSpan={7}
                     className="px-4 py-8 text-center text-xs text-slate-500"
                   >
                     {loading
@@ -326,46 +441,93 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
                   </td>
                 </tr>
               ) : (
-                orders.map((ord) => (
-                  <tr key={ord.id} className="hover:bg-slate-50/70">
-                    <td className="px-4 py-3 font-mono text-xs font-semibold text-slate-900">
-                      #{ord.retailcrm_order_id}
-                      {ord.retailcrm_order_number &&
-                      ord.retailcrm_order_number !==
-                        String(ord.retailcrm_order_id) ? (
-                        <span className="ml-1.5 font-sans font-normal text-slate-500">
-                          (№{ord.retailcrm_order_number})
-                        </span>
-                      ) : null}
-                      {ord.retailcrm_site && (
-                        <div className="font-sans text-[11px] font-normal text-slate-400">
-                          {ord.retailcrm_site}
-                        </div>
+                orders.map((ord) => {
+                  const isExpanded = expandedId === ord.id;
+                  return (
+                    <React.Fragment key={ord.id}>
+                      <tr
+                        onClick={() =>
+                          setExpandedId(isExpanded ? null : ord.id)
+                        }
+                        className="cursor-pointer hover:bg-slate-50/70"
+                      >
+                        <td className="px-2 py-3 text-center text-slate-400">
+                          {isExpanded ? (
+                            <ChevronUp className="h-4 w-4" />
+                          ) : (
+                            <ChevronDown className="h-4 w-4" />
+                          )}
+                        </td>
+                        <td className="px-4 py-3 font-mono text-xs font-semibold text-slate-900">
+                          #{ord.retailcrm_order_id}
+                          {ord.retailcrm_order_number &&
+                          ord.retailcrm_order_number !==
+                            String(ord.retailcrm_order_id) ? (
+                            <span className="ml-1.5 font-sans font-normal text-slate-500">
+                              (№{ord.retailcrm_order_number})
+                            </span>
+                          ) : null}
+                          {ord.retailcrm_site && (
+                            <div className="font-sans text-[11px] font-normal text-slate-400">
+                              {ord.retailcrm_site}
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 font-mono text-xs text-slate-700">
+                          {ord.komtet_order_id ? `#${ord.komtet_order_id}` : "—"}
+                        </td>
+                        <td className="px-4 py-3">
+                          {getSyncStatusBadge(ord.sync_status)}
+                        </td>
+                        <td className="px-4 py-3 font-mono text-xs text-slate-600">
+                          {ord.komtet_state || "—"}
+                        </td>
+                        <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-500">
+                          {formatDateTime(ord.updated_at)}
+                        </td>
+                        <td className="max-w-xs px-4 py-3 text-xs text-red-600">
+                          {ord.last_error ? (
+                            <span
+                              className="line-clamp-2"
+                              title={ord.last_error}
+                            >
+                              {ord.last_error}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">—</span>
+                          )}
+                        </td>
+                      </tr>
+
+                      {isExpanded && (
+                        <tr className="bg-slate-50/90">
+                          <td colSpan={7} className="px-6 py-4">
+                            <div className="space-y-3 text-xs">
+                              {ord.last_error && (
+                                <div>
+                                  <div className="font-semibold text-red-700">
+                                    Полный текст ошибки:
+                                  </div>
+                                  <pre className="mt-1 max-w-full overflow-x-auto whitespace-pre-wrap rounded-lg border border-red-200 bg-red-50 p-2.5 font-mono text-[11px] text-red-900">
+                                    {ord.last_error}
+                                  </pre>
+                                </div>
+                              )}
+                              <div>
+                                <div className="font-semibold text-slate-700">
+                                  JSON связки заказа:
+                                </div>
+                                <pre className="mt-1 max-h-72 max-w-full overflow-auto rounded-lg border border-slate-200 bg-slate-900 p-3 font-mono text-[11px] text-slate-100">
+                                  {JSON.stringify(ord, null, 2)}
+                                </pre>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
                       )}
-                    </td>
-                    <td className="px-4 py-3 font-mono text-xs text-slate-700">
-                      {ord.komtet_order_id ? `#${ord.komtet_order_id}` : "—"}
-                    </td>
-                    <td className="px-4 py-3">
-                      {getSyncStatusBadge(ord.sync_status)}
-                    </td>
-                    <td className="px-4 py-3 font-mono text-xs text-slate-600">
-                      {ord.komtet_state || "—"}
-                    </td>
-                    <td className="px-4 py-3 text-xs text-slate-500">
-                      {formatDateTime(ord.updated_at)}
-                    </td>
-                    <td className="max-w-xs px-4 py-3 text-xs text-red-600">
-                      {ord.last_error ? (
-                        <span className="line-clamp-2" title={ord.last_error}>
-                          {ord.last_error}
-                        </span>
-                      ) : (
-                        <span className="text-slate-400">—</span>
-                      )}
-                    </td>
-                  </tr>
-                ))
+                    </React.Fragment>
+                  );
+                })
               )}
             </tbody>
           </table>
@@ -373,7 +535,7 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
 
         {/* Пагинация */}
         {total > PAGE_LIMIT && (
-          <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-xs text-slate-600">
+          <div className="mt-4 flex flex-col gap-2 border-t border-slate-100 pt-3 text-xs text-slate-600 sm:flex-row sm:items-center sm:justify-between">
             <div>
               Показано {offset + 1}–{Math.min(offset + PAGE_LIMIT, total)} из{" "}
               {total}
@@ -383,7 +545,7 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
                 type="button"
                 disabled={offset === 0 || loading}
                 onClick={() => setOffset(Math.max(0, offset - PAGE_LIMIT))}
-                className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-2.5 py-1 hover:bg-slate-50 disabled:opacity-40"
+                className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg border border-slate-300 px-3 py-1.5 hover:bg-slate-50 disabled:opacity-40 sm:flex-none sm:py-1"
               >
                 <ChevronLeft className="h-3.5 w-3.5" />
                 Назад
@@ -392,7 +554,7 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
                 type="button"
                 disabled={offset + PAGE_LIMIT >= total || loading}
                 onClick={() => setOffset(offset + PAGE_LIMIT)}
-                className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-2.5 py-1 hover:bg-slate-50 disabled:opacity-40"
+                className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg border border-slate-300 px-3 py-1.5 hover:bg-slate-50 disabled:opacity-40 sm:flex-none sm:py-1"
               >
                 Вперед
                 <ChevronRight className="h-3.5 w-3.5" />

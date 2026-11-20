@@ -36,13 +36,65 @@ function formatDateTime(iso: string | null | undefined): string {
   }
 }
 
+const KOMTET_STATE_LABELS: Record<string, string> = {
+  new: "Новый",
+  delivery: "В доставке",
+  done: "Выполнен",
+  canceled: "Отменён",
+  cancelled: "Отменён",
+  error: "Ошибка",
+};
+
+const MANUAL_STATUS_LABELS: Record<string, string> = {
+  created: "Заказ создан в КОМТЕТ",
+  updated: "Заказ обновлён в КОМТЕТ",
+  canceled: "Заказ отменён в КОМТЕТ",
+  deleted: "Заказ удалён в КОМТЕТ",
+  skipped: "Отправка пропущена",
+  processed: "Обработан",
+  ignored: "Проигнорирован",
+  error: "Ошибка отправки",
+};
+
+const MANUAL_REASON_LABELS: Record<string, string> = {
+  auto_sync_disabled: "автосинхронизация отключена",
+  anti_loop: "защита от повторной отправки",
+  already_done: "заказ уже выполнен в КОМТЕТ",
+  canceled_no_action: "заказ отменён, действий не требуется",
+  final_status: "заказ уже в финальном статусе",
+  status_not_triggered: "статус заказа не входит в список отправки",
+  status_not_trigger: "статус заказа не входит в список отправки",
+  komtet_canceled: "заказ отменён в КОМТЕТ",
+  unchanged: "данные заказа не изменились",
+  duplicate_callback: "повторное уведомление",
+  order_not_found: "заказ не найден",
+};
+
+function getKomtetStateLabel(state: string | null | undefined): string {
+  if (!state) return "—";
+  return KOMTET_STATE_LABELS[state.toLowerCase()] || state;
+}
+
+function getManualStatusLabel(status: string): string {
+  return MANUAL_STATUS_LABELS[status.toLowerCase()] || status;
+}
+
+function getManualReasonLabel(reason: string): string {
+  return MANUAL_REASON_LABELS[reason.toLowerCase()] || reason;
+}
+
 function getSyncStatusBadge(status: string) {
   switch (status) {
     case "completed":
+      return (
+        <span className="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700">
+          Выполнен
+        </span>
+      );
     case "paid":
       return (
         <span className="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700">
-          Выполнен ({status})
+          Оплачен
         </span>
       );
     case "synced":
@@ -54,13 +106,19 @@ function getSyncStatusBadge(status: string) {
     case "canceled":
       return (
         <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-700">
-          Отменен
+          Отменён
         </span>
       );
     case "error":
       return (
         <span className="inline-flex items-center rounded-full bg-red-50 px-2.5 py-0.5 text-xs font-semibold text-red-700">
           Ошибка
+        </span>
+      );
+    case "pending":
+      return (
+        <span className="inline-flex items-center rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-700">
+          В ожидании
         </span>
       );
     default:
@@ -126,7 +184,9 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
     e.preventDefault();
     const parsedId = parseInt(manualOrderId.trim(), 10);
     if (Number.isNaN(parsedId) || parsedId <= 0) {
-      setManualError("Введите корректный положительный ID заказа RetailCRM");
+      setManualError(
+        "Введите корректный ID заказа в RetailCRM (число больше 0).",
+      );
       return;
     }
 
@@ -183,7 +243,7 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
               onChange={(e) => setIgnoreStatusFilter(e.target.checked)}
               className="h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600"
             />
-            Игнорировать фильтр триггерных статусов
+            Отправить независимо от текущего статуса заказа
           </label>
 
           <button
@@ -223,13 +283,12 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
               )}
               <div className="min-w-0 space-y-1">
                 <div className="font-semibold">
-                  Результат синхронизации заказа #
-                  {manualResult.result.retailcrm_order_id}:{" "}
-                  <span className="uppercase">
-                    {manualResult.result.status}
+                  Заказ #{manualResult.result.retailcrm_order_id}:{" "}
+                  <span>
+                    {getManualStatusLabel(manualResult.result.status)}
                   </span>
                   {manualResult.result.reason
-                    ? ` (${manualResult.result.reason})`
+                    ? ` (${getManualReasonLabel(manualResult.result.reason)})`
                     : ""}
                 </div>
                 {manualResult.result.komtet_order_id && (
@@ -256,15 +315,15 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
         )}
       </div>
 
-      {/* Таблица / карточки синхронизированных заказов */}
+      {/* Таблица / карточки переданных заказов */}
       <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h3 className="text-base font-semibold text-slate-900">
-              Синхронизированные заказы ({total})
+              Переданные заказы ({total})
             </h3>
             <p className="text-xs text-slate-500">
-              Двусторонняя связка заказов RetailCRM и КОМТЕТ Кассы. Нажмите на запись для просмотра подробностей.
+              Заказы, переданные между RetailCRM и КОМТЕТ Кассой. Нажмите на запись для просмотра подробностей.
             </p>
           </div>
 
@@ -277,12 +336,12 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
               }}
               className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs focus:border-blue-600 focus:outline-none sm:w-auto sm:py-1.5"
             >
-              <option value="">Все статусы связки</option>
-              <option value="synced">Синхронизирован (synced)</option>
-              <option value="completed">Выполнен (completed)</option>
-              <option value="canceled">Отменен (canceled)</option>
-              <option value="error">Ошибка (error)</option>
-              <option value="pending">В ожидании (pending)</option>
+              <option value="">Все статусы</option>
+              <option value="synced">Синхронизирован</option>
+              <option value="completed">Выполнен</option>
+              <option value="canceled">Отменён</option>
+              <option value="error">Ошибка</option>
+              <option value="pending">В ожидании</option>
             </select>
 
             <button
@@ -311,7 +370,7 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
             <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/70 px-4 py-8 text-center text-xs text-slate-500">
               {loading
                 ? "Загрузка заказов..."
-                : "Записей синхронизации заказов пока нет"}
+                : "Переданных заказов пока нет"}
             </div>
           ) : (
             orders.map((ord) => {
@@ -363,14 +422,14 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
                     </div>
                     <div>
                       <div className="text-[11px] text-slate-400">
-                        Статус КОМТЕТ
+                        Статус в КОМТЕТ
                       </div>
-                      <div className="font-mono text-slate-700">
-                        {ord.komtet_state || "—"}
+                      <div className="text-slate-700">
+                        {getKomtetStateLabel(ord.komtet_state)}
                       </div>
                     </div>
                     <div className="col-span-2">
-                      <div className="text-[11px] text-slate-400">Обновлен</div>
+                      <div className="text-[11px] text-slate-400">Обновлён</div>
                       <div className="text-slate-600">
                         {formatDateTime(ord.updated_at)}
                       </div>
@@ -388,6 +447,39 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
                       onClick={(e) => e.stopPropagation()}
                       className="mt-3 space-y-2.5 border-t border-slate-100 pt-3 text-xs"
                     >
+                      <dl className="grid grid-cols-1 gap-2 rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
+                        <div>
+                          <dt className="text-[11px] text-slate-400">Магазин</dt>
+                          <dd className="font-medium text-slate-800">
+                            {ord.retailcrm_site || "—"}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="text-[11px] text-slate-400">
+                            Статус в КОМТЕТ
+                          </dt>
+                          <dd className="font-medium text-slate-800">
+                            {getKomtetStateLabel(ord.komtet_state)}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="text-[11px] text-slate-400">
+                            Последнее обновление
+                          </dt>
+                          <dd className="text-slate-700">
+                            {formatDateTime(ord.last_synced_at || ord.updated_at)}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="text-[11px] text-slate-400">
+                            Последнее уведомление от КОМТЕТ
+                          </dt>
+                          <dd className="text-slate-700">
+                            {formatDateTime(ord.last_komtet_callback_at)}
+                          </dd>
+                        </div>
+                      </dl>
+
                       {ord.last_error && (
                         <div>
                           <div className="font-semibold text-red-700">
@@ -398,14 +490,15 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
                           </pre>
                         </div>
                       )}
-                      <div>
-                        <div className="font-semibold text-slate-700">
-                          JSON связки заказа:
-                        </div>
-                        <pre className="mt-1 max-h-64 max-w-full overflow-auto rounded-lg border border-slate-200 bg-slate-900 p-2.5 font-mono text-[11px] text-slate-100">
+
+                      <details className="rounded-lg border border-slate-200 bg-white">
+                        <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-slate-600 hover:text-slate-900">
+                          Технические данные (для поддержки)
+                        </summary>
+                        <pre className="max-h-64 max-w-full overflow-auto border-t border-slate-200 bg-slate-900 p-2.5 font-mono text-[11px] text-slate-100">
                           {JSON.stringify(ord, null, 2)}
                         </pre>
-                      </div>
+                      </details>
                     </div>
                   )}
                 </div>
@@ -424,7 +517,7 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
                 <th className="px-4 py-2.5">ID заказа КОМТЕТ</th>
                 <th className="px-4 py-2.5">Статус синхронизации</th>
                 <th className="px-4 py-2.5">Статус в КОМТЕТ</th>
-                <th className="px-4 py-2.5">Обновлен</th>
+                <th className="px-4 py-2.5">Обновлён</th>
                 <th className="px-4 py-2.5">Последняя ошибка</th>
               </tr>
             </thead>
@@ -437,7 +530,7 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
                   >
                     {loading
                       ? "Загрузка заказов..."
-                      : "Записей синхронизации заказов пока нет"}
+                      : "Переданных заказов пока нет"}
                   </td>
                 </tr>
               ) : (
@@ -479,8 +572,8 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
                         <td className="px-4 py-3">
                           {getSyncStatusBadge(ord.sync_status)}
                         </td>
-                        <td className="px-4 py-3 font-mono text-xs text-slate-600">
-                          {ord.komtet_state || "—"}
+                        <td className="px-4 py-3 text-xs text-slate-700">
+                          {getKomtetStateLabel(ord.komtet_state)}
                         </td>
                         <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-500">
                           {formatDateTime(ord.updated_at)}
@@ -503,6 +596,43 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
                         <tr className="bg-slate-50/90">
                           <td colSpan={7} className="px-6 py-4">
                             <div className="space-y-3 text-xs">
+                              <dl className="grid grid-cols-2 gap-3 rounded-lg border border-slate-200 bg-white p-3 lg:grid-cols-4">
+                                <div>
+                                  <dt className="text-[11px] text-slate-400">
+                                    Магазин
+                                  </dt>
+                                  <dd className="mt-0.5 font-medium text-slate-800">
+                                    {ord.retailcrm_site || "—"}
+                                  </dd>
+                                </div>
+                                <div>
+                                  <dt className="text-[11px] text-slate-400">
+                                    Статус в КОМТЕТ
+                                  </dt>
+                                  <dd className="mt-0.5 font-medium text-slate-800">
+                                    {getKomtetStateLabel(ord.komtet_state)}
+                                  </dd>
+                                </div>
+                                <div>
+                                  <dt className="text-[11px] text-slate-400">
+                                    Последнее обновление
+                                  </dt>
+                                  <dd className="mt-0.5 text-slate-700">
+                                    {formatDateTime(
+                                      ord.last_synced_at || ord.updated_at,
+                                    )}
+                                  </dd>
+                                </div>
+                                <div>
+                                  <dt className="text-[11px] text-slate-400">
+                                    Последнее уведомление от КОМТЕТ
+                                  </dt>
+                                  <dd className="mt-0.5 text-slate-700">
+                                    {formatDateTime(ord.last_komtet_callback_at)}
+                                  </dd>
+                                </div>
+                              </dl>
+
                               {ord.last_error && (
                                 <div>
                                   <div className="font-semibold text-red-700">
@@ -513,14 +643,15 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
                                   </pre>
                                 </div>
                               )}
-                              <div>
-                                <div className="font-semibold text-slate-700">
-                                  JSON связки заказа:
-                                </div>
-                                <pre className="mt-1 max-h-72 max-w-full overflow-auto rounded-lg border border-slate-200 bg-slate-900 p-3 font-mono text-[11px] text-slate-100">
+
+                              <details className="rounded-lg border border-slate-200 bg-white">
+                                <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-slate-600 hover:text-slate-900">
+                                  Технические данные (для поддержки)
+                                </summary>
+                                <pre className="max-h-72 max-w-full overflow-auto border-t border-slate-200 bg-slate-900 p-3 font-mono text-[11px] text-slate-100">
                                   {JSON.stringify(ord, null, 2)}
                                 </pre>
-                              </div>
+                              </details>
                             </div>
                           </td>
                         </tr>

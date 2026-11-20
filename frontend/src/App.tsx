@@ -73,7 +73,7 @@ export const App: React.FC = () => {
     e.preventDefault();
     const cleaned = tokenInput.trim();
     if (!cleaned) {
-      setAuthError("Введите Admin API Token");
+      setAuthError("Введите ключ доступа");
       return;
     }
     setAuthLoading(true);
@@ -89,11 +89,13 @@ export const App: React.FC = () => {
       if (err instanceof ApiError && err.status === 401) {
         setStoredToken("");
         setHasSavedToken(false);
-        setAuthError("Неверный Admin API Token (401 Unauthorized)");
+        setAuthError(
+          "Неверный ключ доступа. Проверьте ввод и попробуйте снова.",
+        );
         setNeedsAuth(true);
       } else {
         setAuthError(
-          err instanceof Error ? err.message : "Ошибка проверки токена",
+          err instanceof Error ? err.message : "Ошибка проверки ключа доступа",
         );
       }
     } finally {
@@ -128,9 +130,6 @@ export const App: React.FC = () => {
                 <h1 className="text-base font-bold tracking-tight text-slate-900 sm:text-lg">
                   RetailCRM ↔ КОМТЕТ Касса Курьер
                 </h1>
-                <span className="shrink-0 rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-semibold text-blue-700">
-                  v0.2
-                </span>
               </div>
               <p className="mt-0.5 text-xs text-slate-500">
                 Сервис двусторонней синхронизации заказов курьерской доставки и фискализации 54-ФЗ
@@ -160,23 +159,16 @@ export const App: React.FC = () => {
               </span>
             )}
 
-            <button
-              type="button"
-              onClick={handleLogoutOrSwitchToken}
-              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
-            >
-              {hasSavedToken ? (
-                <>
-                  <LogOut className="h-3.5 w-3.5 shrink-0 text-slate-500" />
-                  Выйти / Сменить токен
-                </>
-              ) : (
-                <>
-                  <KeyRound className="h-3.5 w-3.5 shrink-0 text-slate-500" />
-                  Ввести токен
-                </>
-              )}
-            </button>
+            {!needsAuth && hasSavedToken && (
+              <button
+                type="button"
+                onClick={handleLogoutOrSwitchToken}
+                className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+              >
+                <LogOut className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                Выйти
+              </button>
+            )}
           </div>
         </div>
 
@@ -210,7 +202,7 @@ export const App: React.FC = () => {
                 }`}
               >
                 <GitCompareArrows className="h-4 w-4 shrink-0" />
-                Статусы и маппинг
+                Статусы и соответствия
               </button>
 
               <button
@@ -223,7 +215,7 @@ export const App: React.FC = () => {
                 }`}
               >
                 <ListOrdered className="h-4 w-4 shrink-0" />
-                Заказы и ручной тест
+                Заказы
               </button>
 
               <button
@@ -236,7 +228,7 @@ export const App: React.FC = () => {
                 }`}
               >
                 <FileText className="h-4 w-4 shrink-0" />
-                Журнал логов
+                Журнал событий
               </button>
             </nav>
           </div>
@@ -252,24 +244,23 @@ export const App: React.FC = () => {
                 <Lock className="h-6 w-6" />
               </div>
               <h2 className="mt-4 text-lg font-bold text-slate-900">
-                Авторизация в панели управления
+                Вход в панель управления
               </h2>
               <p className="mt-1 text-xs text-slate-500">
-                Введите <span className="font-mono">ADMIN_API_TOKEN</span>, заданный в переменных окружения сервера. Токен сохраняется в{" "}
-                <span className="font-mono">localStorage</span> вашего браузера только после успешной проверки.
+                Введите ключ доступа, полученный при настройке сервиса. Ключ сохранится в этом браузере после успешного входа.
               </p>
             </div>
 
             <form onSubmit={handleLoginSubmit} className="mt-6 space-y-4">
               <div>
                 <label className="mb-1 block text-xs font-medium text-slate-700">
-                  Admin API Token
+                  Ключ доступа
                 </label>
                 <input
                   type="password"
                   value={tokenInput}
                   onChange={(e) => setTokenInput(e.target.value)}
-                  placeholder="Введите секретный токен администратора"
+                  placeholder="Введите ключ доступа"
                   autoFocus
                   disabled={authLoading}
                   className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20 disabled:opacity-60"
@@ -296,7 +287,7 @@ export const App: React.FC = () => {
           <div className="mx-auto mt-10 flex max-w-md flex-col items-center rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm sm:mt-16">
             <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
             <h2 className="mt-4 text-base font-semibold text-slate-900">
-              Загрузка конфигурации...
+              Загрузка настроек...
             </h2>
             <p className="mt-1 text-xs text-slate-500">
               Получаем актуальные параметры интеграции с сервера
@@ -314,7 +305,7 @@ export const App: React.FC = () => {
               {fatalError || "Сервер вернул пустой ответ"}
             </p>
             <p className="mt-1 text-xs text-slate-500">
-              Редактирование временно заблокировано, чтобы избежать перезаписи настроек пустыми значениями.
+              Проверьте доступность сервера и нажмите «Повторить».
             </p>
             <div className="mt-6 flex flex-col justify-center gap-2.5 sm:flex-row">
               <button
@@ -331,7 +322,7 @@ export const App: React.FC = () => {
                 className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-5 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50 sm:w-auto"
               >
                 <KeyRound className="h-4 w-4 text-slate-500" />
-                Сменить токен
+                Ввести другой ключ доступа
               </button>
             </div>
           </div>

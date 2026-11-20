@@ -32,6 +32,28 @@ function formatDateTime(iso: string): string {
   }
 }
 
+const EVENT_TYPE_LABELS: Record<string, string> = {
+  order_create: "Создание заказа",
+  order_update: "Обновление заказа",
+  order_cancel: "Отмена заказа",
+  sync_skipped: "Пропуск синхронизации",
+  anti_loop_skipped: "Защита от повтора",
+  komtet_link_resolved: "Связь с КОМТЕТ найдена",
+  komtet_order_missing: "Заказ не найден в КОМТЕТ",
+  crm_writeback_failed: "Ошибка записи в RetailCRM",
+  sync_error: "Ошибка синхронизации",
+  signature_invalid: "Неверная подпись уведомления",
+  callback_processed: "Чек пробит (обновлено в CRM)",
+  callback_state_update: "Обновление статуса из КОМТЕТ",
+  callback_duplicate_skipped: "Повторное уведомление",
+  callback_order_not_found: "Заказ из уведомления не найден",
+  callback_error: "Ошибка обработки уведомления",
+};
+
+function getEventTypeLabel(eventType: string): string {
+  return EVENT_TYPE_LABELS[eventType] || eventType.replace(/_/g, " ");
+}
+
 function getLogBadge(item: SyncLogItem) {
   const skippedEvents = [
     "sync_skipped",
@@ -42,27 +64,27 @@ function getLogBadge(item: SyncLogItem) {
   if (item.level === "ERROR") {
     return (
       <span className="inline-flex items-center rounded-full bg-red-50 px-2.5 py-0.5 text-xs font-semibold text-red-700">
-        ERROR
+        Ошибка
       </span>
     );
   }
   if (item.level === "WARNING") {
     return (
       <span className="inline-flex items-center rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-700">
-        WARN
+        Предупреждение
       </span>
     );
   }
   if (skippedEvents.includes(item.event_type)) {
     return (
       <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-600">
-        SKIPPED
+        Пропущено
       </span>
     );
   }
   return (
     <span className="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700">
-      SUCCESS
+      Успешно
     </span>
   );
 }
@@ -144,7 +166,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
               Журнал событий синхронизации ({total})
             </h2>
             <p className="text-xs text-slate-500">
-              Кликните на любую запись журнала для просмотра JSON-пейлоада и деталей события
+              Нажмите на любую запись, чтобы посмотреть подробности события
             </p>
           </div>
 
@@ -158,10 +180,10 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
               }}
               className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs focus:border-blue-600 focus:outline-none lg:w-auto lg:py-1.5"
             >
-              <option value="all">Статус: Все (all)</option>
-              <option value="success">Успешные (success)</option>
-              <option value="error">Ошибки (error)</option>
-              <option value="skipped">Пропущенные (skipped)</option>
+              <option value="all">Все статусы</option>
+              <option value="success">Успешные</option>
+              <option value="error">Ошибки</option>
+              <option value="skipped">Пропущенные</option>
             </select>
 
             {/* Фильтр по направлению */}
@@ -173,13 +195,9 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
               }}
               className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs focus:border-blue-600 focus:outline-none lg:w-auto lg:py-1.5"
             >
-              <option value="all">Направление: Все (all)</option>
-              <option value="retailcrm_to_komtet">
-                RetailCRM → КОМТЕТ (retailcrm_to_komtet)
-              </option>
-              <option value="komtet_to_retailcrm">
-                КОМТЕТ → RetailCRM (komtet_to_retailcrm)
-              </option>
+              <option value="all">Все направления</option>
+              <option value="retailcrm_to_komtet">RetailCRM → КОМТЕТ</option>
+              <option value="komtet_to_retailcrm">КОМТЕТ → RetailCRM</option>
             </select>
 
             {/* Поиск по order_id */}
@@ -266,8 +284,8 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
                       <ArrowLeftRight className="h-3.5 w-3.5 text-slate-400" />
                       {getDirectionLabel(log.direction)}
                     </span>
-                    <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-700">
-                      {log.event_type}
+                    <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-700">
+                      {getEventTypeLabel(log.event_type)}
                     </span>
                     {(log.retailcrm_order_id || log.komtet_order_id) && (
                       <span className="font-mono text-[11px] font-medium text-slate-600">
@@ -275,7 +293,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
                           ? `CRM #${log.retailcrm_order_id}`
                           : "—"}
                         {log.komtet_order_id
-                          ? ` / K #${log.komtet_order_id}`
+                          ? ` / КОМТЕТ #${log.komtet_order_id}`
                           : ""}
                       </span>
                     )}
@@ -306,19 +324,19 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
                       )}
 
                       {log.payload && (
-                        <div>
-                          <div className="font-semibold text-slate-700">
-                            JSON Payload:
-                          </div>
-                          <pre className="mt-1 max-h-80 max-w-full overflow-auto rounded-lg border border-slate-200 bg-slate-900 p-2.5 font-mono text-[11px] text-slate-100">
+                        <details className="rounded-lg border border-slate-200 bg-white">
+                          <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-slate-600 hover:text-slate-900">
+                            Технические данные (для поддержки)
+                          </summary>
+                          <pre className="max-h-80 max-w-full overflow-auto border-t border-slate-200 bg-slate-900 p-2.5 font-mono text-[11px] text-slate-100">
                             {JSON.stringify(log.payload, null, 2)}
                           </pre>
-                        </div>
+                        </details>
                       )}
 
                       {!log.error_details && !log.payload && (
                         <div className="text-[11px] text-slate-400">
-                          Дополнительный JSON payload отсутствует.
+                          Дополнительных данных нет.
                         </div>
                       )}
                     </div>
@@ -383,15 +401,15 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
                             {getDirectionLabel(log.direction)}
                           </span>
                         </td>
-                        <td className="px-3 py-3 font-mono text-xs text-slate-700">
-                          {log.event_type}
+                        <td className="px-3 py-3 text-xs text-slate-700">
+                          {getEventTypeLabel(log.event_type)}
                         </td>
                         <td className="whitespace-nowrap px-3 py-3 font-mono text-xs text-slate-700">
                           {log.retailcrm_order_id
                             ? `CRM #${log.retailcrm_order_id}`
                             : "—"}
                           {log.komtet_order_id
-                            ? ` / K #${log.komtet_order_id}`
+                            ? ` / КОМТЕТ #${log.komtet_order_id}`
                             : ""}
                         </td>
                         <td className="max-w-md px-3 py-3 text-xs text-slate-800">
@@ -423,16 +441,20 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
                                 </div>
                               )}
 
-                              {log.payload && (
-                                <div>
-                                  <div className="font-semibold text-slate-700">
-                                    JSON Payload:
-                                  </div>
-                                  <pre className="mt-1 max-h-80 max-w-full overflow-auto rounded-lg border border-slate-200 bg-slate-900 p-3 font-mono text-[11px] text-slate-100">
+                              {log.payload ? (
+                                <details className="rounded-lg border border-slate-200 bg-white">
+                                  <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-slate-600 hover:text-slate-900">
+                                    Технические данные (для поддержки)
+                                  </summary>
+                                  <pre className="max-h-80 max-w-full overflow-auto border-t border-slate-200 bg-slate-900 p-3 font-mono text-[11px] text-slate-100">
                                     {JSON.stringify(log.payload, null, 2)}
                                   </pre>
+                                </details>
+                              ) : !log.error_details ? (
+                                <div className="text-[11px] text-slate-400">
+                                  Дополнительных данных нет.
                                 </div>
-                              )}
+                              ) : null}
                             </div>
                           </td>
                         </tr>

@@ -25,24 +25,24 @@ interface MappingsTabProps {
 }
 
 const KOMTET_PAYMENT_OPTIONS = [
-  { code: "cash", name: "Наличными курьеру (cash)" },
-  { code: "card", name: "Банковской картой курьеру (card)" },
-  { code: "prepayment", name: "Предоплата онлайн (prepayment)" },
+  { code: "cash", name: "Наличными курьеру" },
+  { code: "card", name: "Банковской картой курьеру" },
+  { code: "prepayment", name: "Предоплата онлайн" },
 ];
 
 const KOMTET_VAT_OPTIONS = [
   { code: "22", name: "НДС 22%" },
   { code: "20", name: "НДС 20%" },
   { code: "10", name: "НДС 10%" },
-  { code: "7", name: "НДС 7% (УСН)" },
-  { code: "5", name: "НДС 5% (УСН)" },
+  { code: "7", name: "НДС 7%" },
+  { code: "5", name: "НДС 5%" },
   { code: "0", name: "НДС 0%" },
-  { code: "no", name: "Без НДС (no)" },
-  { code: "122", name: "НДС 22/122 (122)" },
-  { code: "120", name: "НДС 20/120 (120)" },
-  { code: "110", name: "НДС 10/110 (110)" },
-  { code: "107", name: "НДС 7/107 (107)" },
-  { code: "105", name: "НДС 5/105 (105)" },
+  { code: "no", name: "Без НДС" },
+  { code: "122", name: "НДС 22/122 (расчётная)" },
+  { code: "120", name: "НДС 20/120 (расчётная)" },
+  { code: "110", name: "НДС 10/110 (расчётная)" },
+  { code: "107", name: "НДС 7/107 (расчётная)" },
+  { code: "105", name: "НДС 5/105 (расчётная)" },
 ];
 
 const DEFAULT_VAT_ROWS: Array<{
@@ -57,15 +57,17 @@ const DEFAULT_VAT_ROWS: Array<{
   { crmCode: "none", crmName: "Без НДС", komtetCode: "no" },
 ];
 
+const STANDARD_VAT_CODES = new Set(DEFAULT_VAT_ROWS.map((r) => r.crmCode));
+
 const FALLBACK_STATUSES: Array<{ code: string; name: string }> = [
-  { code: "new", name: "Новый (new)" },
-  { code: "paid", name: "Оплачен (paid)" },
-  { code: "send-to-delivery", name: "Передан в доставку (send-to-delivery)" },
-  { code: "delivering", name: "Доставляется (delivering)" },
-  { code: "complete", name: "Выполнен (complete)" },
-  { code: "cancel-other", name: "Отменен (cancel-other)" },
-  { code: "no-product", name: "Нет в наличии (no-product)" },
-  { code: "otklonen", name: "Отклонен (otklonen)" },
+  { code: "new", name: "Новый" },
+  { code: "paid", name: "Оплачен" },
+  { code: "send-to-delivery", name: "Передан в доставку" },
+  { code: "delivering", name: "Доставляется" },
+  { code: "complete", name: "Выполнен" },
+  { code: "cancel-other", name: "Отменён" },
+  { code: "no-product", name: "Нет в наличии" },
+  { code: "otklonen", name: "Отклонён" },
 ];
 
 const FALLBACK_PAYMENT_TYPES: Array<{ code: string; name: string }> = [
@@ -73,6 +75,18 @@ const FALLBACK_PAYMENT_TYPES: Array<{ code: string; name: string }> = [
   { code: "bank-card", name: "Банковская карта" },
   { code: "oplachen", name: "Оплачен (предоплата)" },
 ];
+
+const KOMTET_EMPLOYEE_TYPE_LABELS: Record<string, string> = {
+  courier: "курьер",
+  cashier: "кассир",
+  manager: "менеджер",
+  admin: "администратор",
+};
+
+function translateEmployeeType(type?: string): string {
+  if (!type) return "";
+  return KOMTET_EMPLOYEE_TYPE_LABELS[type.toLowerCase()] || type;
+}
 
 function isValidKomtetCourierId(value: string): boolean {
   const trimmed = value.trim();
@@ -185,7 +199,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
       setErrorMsg(
         err instanceof Error
           ? err.message
-          : "Не удалось загрузить справочники и маппинг",
+          : "Не удалось загрузить справочники и настройки",
       );
     } finally {
       setLoadingDicts(false);
@@ -445,7 +459,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
       });
 
       onSettingsUpdated(updatedSettings);
-      setSuccessMsg("Статусы и таблицы маппинга успешно сохранены");
+      setSuccessMsg("Настройки статусов и соответствий сохранены");
       if (successTimerRef.current !== null) {
         window.clearTimeout(successTimerRef.current);
       }
@@ -461,7 +475,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
       setErrorMsg(
         err instanceof Error
           ? err.message
-          : "Ошибка сохранения маппинга и статусов",
+          : "Ошибка сохранения настроек",
       );
     } finally {
       setSaving(false);
@@ -476,10 +490,10 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
       <div className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <h2 className="text-base font-semibold text-slate-900">
-            Справочники API и сопоставление сущностей
+            Справочники и соответствия
           </h2>
           <p className="text-xs text-slate-500">
-            Загрузка живых статусов, курьеров и типов оплат из RetailCRM и КОМТЕТ Кассы
+            Актуальные статусы, курьеры и способы оплаты из RetailCRM и КОМТЕТ Кассы
           </p>
         </div>
 
@@ -492,18 +506,18 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
           <RefreshCw
             className={`h-4 w-4 text-blue-600 ${loadingDicts ? "animate-spin" : ""}`}
           />
-          Обновить справочники из API
+          Обновить справочники
         </button>
       </div>
 
-      {/* Баннер предупреждений из API (например, SRV00) */}
+      {/* Баннер предупреждений */}
       {dictionaries && dictionaries.warnings.length > 0 && (
         <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
           <div className="flex items-start gap-2.5">
             <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
             <div className="min-w-0 space-y-1">
               <div className="font-semibold">
-                Предупреждения при загрузке справочников API:
+                Предупреждения при загрузке справочников:
               </div>
               <ul className="list-inside list-disc space-y-1 break-words text-xs">
                 {dictionaries.warnings.map((w, idx) => (
@@ -539,11 +553,11 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
         </p>
 
         <div className="mt-4 grid grid-cols-1 gap-5 sm:gap-6 lg:grid-cols-2">
-          {/* Триггерные статусы */}
+          {/* Статусы отправки */}
           <div>
             <div className="mb-2 flex items-center justify-between">
               <span className="text-xs font-semibold text-slate-700">
-                Триггерные статусы отправки в КОМТЕТ ({triggerStatuses.length})
+                Статусы для отправки заказа в КОМТЕТ ({triggerStatuses.length})
               </span>
             </div>
             <div className="max-h-60 space-y-1.5 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50/50 p-2.5 sm:p-3">
@@ -639,7 +653,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
         {/* Финальный статус */}
         <div className="mt-4 max-w-md">
           <label className="mb-1 block text-xs font-semibold text-slate-700">
-            Финальный статус заказа в RetailCRM после фискализации чека (state = done)
+            Статус заказа в RetailCRM после пробития чека
           </label>
           <select
             value={finalStatus}
@@ -648,22 +662,22 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
           >
             {statusesList.map((st) => (
               <option key={st.code} value={st.code}>
-                {st.name} ({st.code})
+                {st.name}
               </option>
             ))}
           </select>
         </div>
       </div>
 
-      {/* Секция 2: Таблица / карточки маппинга Курьеров */}
+      {/* Секция 2: Соответствие курьеров */}
       <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h3 className="text-base font-semibold text-slate-900">
-              2. Маппинг курьеров (RetailCRM ↔ КОМТЕТ Касса)
+              2. Соответствие курьеров (RetailCRM ↔ КОМТЕТ Касса)
             </h3>
             <p className="mt-0.5 text-xs text-slate-500">
-              Выберите сотрудника КОМТЕТ из списка или укажите его числовой ID вручную
+              Выберите сотрудника КОМТЕТ из списка или укажите его ID вручную
             </p>
           </div>
         </div>
@@ -672,7 +686,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
         <div className="mt-4 space-y-3 md:hidden">
           {crmCouriersList.length === 0 ? (
             <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/70 px-4 py-6 text-center text-xs text-slate-500">
-              В справочнике RetailCRM пока нет курьеров. Добавьте связку вручную ниже.
+              В справочнике RetailCRM пока нет курьеров. Добавьте соответствие вручную ниже.
             </div>
           ) : (
             crmCouriersList.map((c) => {
@@ -734,12 +748,15 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                         className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-600 focus:outline-none"
                       >
                         <option value="">— Не выбран / Ввод вручную —</option>
-                        {komtetStaffList.map((emp) => (
-                          <option key={String(emp.id)} value={String(emp.id)}>
-                            {emp.name} (ID: {emp.id}
-                            {emp.type ? `, ${emp.type}` : ""})
-                          </option>
-                        ))}
+                        {komtetStaffList.map((emp) => {
+                          const empType = translateEmployeeType(emp.type);
+                          return (
+                            <option key={String(emp.id)} value={String(emp.id)}>
+                              {emp.name} (ID: {emp.id}
+                              {empType ? `, ${empType}` : ""})
+                            </option>
+                          );
+                        })}
                       </select>
                     </div>
 
@@ -758,7 +775,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                             [c.code]: e.target.value,
                           })
                         }
-                        placeholder="Числовой ID курьера КОМТЕТ"
+                        placeholder="Например: 105"
                         className={`w-full rounded-lg border bg-white px-3 py-2 font-mono text-sm focus:outline-none ${
                           isValid
                             ? "border-slate-300 focus:border-blue-600"
@@ -767,7 +784,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                       />
                       {!isValid && (
                         <p className="mt-1 text-[11px] text-red-600">
-                          Укажите целое положительное число
+                          Введите число больше 0
                         </p>
                       )}
                     </div>
@@ -796,7 +813,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                     colSpan={4}
                     className="px-4 py-6 text-center text-xs text-slate-500"
                   >
-                    В справочнике RetailCRM пока нет курьеров. Добавьте связку вручную ниже.
+                    В справочнике RetailCRM пока нет курьеров. Добавьте соответствие вручную ниже.
                   </td>
                 </tr>
               ) : (
@@ -831,12 +848,18 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                           className="w-full rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs focus:border-blue-600 focus:outline-none"
                         >
                           <option value="">— Не выбран / Ввод вручную —</option>
-                          {komtetStaffList.map((emp) => (
-                            <option key={String(emp.id)} value={String(emp.id)}>
-                              {emp.name} (ID: {emp.id}
-                              {emp.type ? `, ${emp.type}` : ""})
-                            </option>
-                          ))}
+                          {komtetStaffList.map((emp) => {
+                            const empType = translateEmployeeType(emp.type);
+                            return (
+                              <option
+                                key={String(emp.id)}
+                                value={String(emp.id)}
+                              >
+                                {emp.name} (ID: {emp.id}
+                                {empType ? `, ${empType}` : ""})
+                              </option>
+                            );
+                          })}
                         </select>
                       </td>
                       <td className="px-4 py-2.5">
@@ -851,7 +874,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                               [c.code]: e.target.value,
                             })
                           }
-                          placeholder="Числовой ID курьера КОМТЕТ"
+                          placeholder="Например: 105"
                           className={`w-full rounded-lg border px-3 py-1.5 font-mono text-xs focus:outline-none ${
                             isValid
                               ? "border-slate-300 focus:border-blue-600"
@@ -860,7 +883,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                         />
                         {!isValid && (
                           <div className="mt-1 text-[11px] text-red-600">
-                            Только целое положительное число
+                            Введите число больше 0
                           </div>
                         )}
                       </td>
@@ -898,7 +921,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
             type="text"
             value={newCourierName}
             onChange={(e) => setNewCourierName(e.target.value)}
-            placeholder="Имя курьера (опционально)"
+            placeholder="Имя курьера (необязательно)"
             className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs focus:border-blue-600 focus:outline-none sm:w-56 sm:py-1.5"
           />
           <button
@@ -912,15 +935,15 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
         </div>
       </div>
 
-      {/* Секция 3 и 4: Типы оплат и Ставки НДС */}
+      {/* Секция 3 и 4: Способы оплаты и Ставки НДС */}
       <div className="grid grid-cols-1 gap-5 sm:gap-6 lg:grid-cols-2">
-        {/* Типы оплат */}
+        {/* Способы оплаты */}
         <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
           <h3 className="text-base font-semibold text-slate-900">
-            3. Маппинг типов оплат
+            3. Соответствие способов оплаты
           </h3>
           <p className="mt-0.5 text-xs text-slate-500">
-            Сопоставление способов оплаты RetailCRM с типами расчетов КОМТЕТ Кассы
+            Сопоставление способов оплаты RetailCRM с типами расчётов КОМТЕТ Кассы
           </p>
 
           {/* Мобильные карточки (< md) */}
@@ -930,18 +953,13 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                 key={pt.code}
                 className="space-y-2 rounded-xl border border-slate-200 bg-slate-50/60 p-3.5"
               >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium text-slate-900">
-                      {pt.name}
-                    </div>
-                    <div className="font-mono text-xs text-slate-500">
-                      {pt.code}
-                    </div>
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium text-slate-900">
+                    {pt.name}
                   </div>
-                  <span className="shrink-0 rounded-full bg-slate-200/70 px-2 py-0.5 text-[10px] font-medium text-slate-600">
-                    RetailCRM → КОМТЕТ
-                  </span>
+                  <div className="font-mono text-xs text-slate-500">
+                    {pt.code}
+                  </div>
                 </div>
                 <select
                   value={paymentMap[pt.code] || ""}
@@ -953,7 +971,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                   }
                   className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-600 focus:outline-none"
                 >
-                  <option value="">— По умолчанию (card) —</option>
+                  <option value="">— По умолчанию (банковской картой) —</option>
                   {KOMTET_PAYMENT_OPTIONS.map((opt) => (
                     <option key={opt.code} value={opt.code}>
                       {opt.name}
@@ -995,7 +1013,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                         }
                         className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs focus:border-blue-600 focus:outline-none"
                       >
-                        <option value="">— По умолчанию (card) —</option>
+                        <option value="">— По умолчанию (банковской картой) —</option>
                         {KOMTET_PAYMENT_OPTIONS.map((opt) => (
                           <option key={opt.code} value={opt.code}>
                             {opt.name}
@@ -1013,7 +1031,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
         {/* Ставки НДС */}
         <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
           <h3 className="text-base font-semibold text-slate-900">
-            4. Маппинг ставок НДС
+            4. Соответствие ставок НДС
           </h3>
           <p className="mt-0.5 text-xs text-slate-500">
             Поддержка ставок НДС 22%, 20%, 10%, 7%, 5%, 0%, расчётных ставок и «Без НДС» по 54-ФЗ
@@ -1036,18 +1054,15 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                   key={row.crmCode}
                   className="space-y-2 rounded-xl border border-slate-200 bg-slate-50/60 p-3.5"
                 >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-medium text-slate-900">
-                        {row.crmName}
-                      </div>
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium text-slate-900">
+                      {row.crmName}
+                    </div>
+                    {!STANDARD_VAT_CODES.has(row.crmCode) && (
                       <div className="font-mono text-xs text-slate-500">
                         код: {row.crmCode}
                       </div>
-                    </div>
-                    <span className="shrink-0 rounded-full bg-slate-200/70 px-2 py-0.5 text-[10px] font-medium text-slate-600">
-                      RetailCRM → КОМТЕТ
-                    </span>
+                    )}
                   </div>
                   <select
                     value={selectedVat}
@@ -1096,9 +1111,11 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
                         <div className="font-medium text-slate-900">
                           {row.crmName}
                         </div>
-                        <div className="font-mono text-xs text-slate-400">
-                          код: {row.crmCode}
-                        </div>
+                        {!STANDARD_VAT_CODES.has(row.crmCode) && (
+                          <div className="font-mono text-xs text-slate-400">
+                            код: {row.crmCode}
+                          </div>
+                        )}
                       </td>
                       <td className="px-3 py-2.5">
                         <select
@@ -1140,14 +1157,14 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
           ) : (
             <Save className="h-4 w-4" />
           )}
-          Сохранить маппинг и статусы
+          Сохранить настройки
         </button>
 
         <div className="inline-flex items-center gap-1.5 text-xs text-slate-500">
           <GitCompareArrows className="h-4 w-4 shrink-0 text-slate-400" />
           <span>
             {!loadedOk && !loadingDicts
-              ? "Сохранение недоступно до успешной загрузки справочников и маппинга"
+              ? "Сохранение недоступно, пока не загружены справочники"
               : "Изменения применяются мгновенно для всех новых синхронизаций"}
           </span>
         </div>

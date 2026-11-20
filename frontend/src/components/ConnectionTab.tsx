@@ -28,26 +28,26 @@ interface ConnectionTabProps {
 }
 
 const TAX_SYSTEM_OPTIONS = [
-  { value: 0, label: "0 — ОСНО (Общая система налогообложения)" },
-  { value: 1, label: "1 — УСН Доход" },
-  { value: 2, label: "2 — УСН Доход минус Расход" },
-  { value: 4, label: "4 — ЕСХН (Единый сельскохозяйственный налог)" },
-  { value: 5, label: "5 — Патент (ПСН)" },
+  { value: 0, label: "ОСНО (Общая система налогообложения)" },
+  { value: 1, label: "УСН Доход" },
+  { value: 2, label: "УСН Доход минус расход" },
+  { value: 4, label: "ЕСХН" },
+  { value: 5, label: "Патент (ПСН)" },
 ];
 
 const VAT_OPTIONS = [
-  { value: "22", label: "22% — НДС 22%" },
-  { value: "20", label: "20% — НДС 20%" },
-  { value: "10", label: "10% — НДС 10%" },
-  { value: "7", label: "7% — НДС 7% (УСН)" },
-  { value: "5", label: "5% — НДС 5% (УСН)" },
-  { value: "0", label: "0% — НДС 0%" },
-  { value: "no", label: "no — Без НДС" },
-  { value: "122", label: "22/122 — расчётная ставка (122)" },
-  { value: "120", label: "20/120 — расчётная ставка (120)" },
-  { value: "110", label: "10/110 — расчётная ставка (110)" },
-  { value: "107", label: "7/107 — расчётная ставка (107)" },
-  { value: "105", label: "5/105 — расчётная ставка (105)" },
+  { value: "22", label: "НДС 22%" },
+  { value: "20", label: "НДС 20%" },
+  { value: "10", label: "НДС 10%" },
+  { value: "7", label: "НДС 7%" },
+  { value: "5", label: "НДС 5%" },
+  { value: "0", label: "НДС 0%" },
+  { value: "no", label: "Без НДС" },
+  { value: "122", label: "НДС 22/122 (расчётная)" },
+  { value: "120", label: "НДС 20/120 (расчётная)" },
+  { value: "110", label: "НДС 10/110 (расчётная)" },
+  { value: "107", label: "НДС 7/107 (расчётная)" },
+  { value: "105", label: "НДС 5/105 (расчётная)" },
 ];
 
 async function copyTextToClipboard(text: string): Promise<boolean> {
@@ -184,7 +184,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
     const copied = await copyTextToClipboard(text);
     if (!copied) {
       setErrorMsg(
-        "Не удалось скопировать URL в буфер обмена. Скопируйте значение вручную.",
+        "Не удалось скопировать адрес. Скопируйте его вручную.",
       );
       return;
     }
@@ -230,7 +230,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
       payload.komtet_queue_id = null;
     } else if (!/^\d+$/.test(trimmedQueue) || Number(trimmedQueue) <= 0) {
       throw new Error(
-        "Queue ID (ID очереди кассы) должен быть целым положительным числом или пустым.",
+        "ID очереди кассы должен быть положительным числом (или оставьте поле пустым).",
       );
     } else {
       payload.komtet_queue_id = Number(trimmedQueue);
@@ -334,7 +334,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                 Подключение к RetailCRM
               </h2>
               <p className="text-xs text-slate-500">
-                Доступ к заказам, оплатам, справочникам и доп. полям (API v5)
+                Доступ к заказам, оплатам и справочникам RetailCRM
               </p>
             </div>
           </div>
@@ -342,7 +342,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
           <div className="space-y-4">
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-700">
-                URL кабинета RetailCRM
+                Адрес кабинета RetailCRM
               </label>
               <input
                 type="url"
@@ -381,7 +381,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <label className="mb-1 block text-xs font-medium text-slate-700">
-                  Код сайта по умолчанию (site)
+                  Код магазина в RetailCRM по умолчанию
                 </label>
                 <input
                   type="text"
@@ -394,7 +394,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
 
               <div>
                 <label className="mb-1 block text-xs font-medium text-slate-700">
-                  Код доп. поля ID заказа КОМТЕТ
+                  Код доп. поля для номера заказа КОМТЕТ
                 </label>
                 <input
                   type="text"
@@ -410,7 +410,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
               <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
                   <div className="text-xs font-medium text-slate-700">
-                    URL вебхука для триггера в RetailCRM
+                    Адрес для уведомлений из RetailCRM (укажите в настройках триггера)
                   </div>
                   <div className="mt-0.5 break-all font-mono text-xs text-slate-600 sm:truncate">
                     {crmWebhookUrl}
@@ -429,7 +429,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                   ) : (
                     <>
                       <Copy className="h-3.5 w-3.5" />
-                      Скопировать URL
+                      Скопировать
                     </>
                   )}
                 </button>
@@ -449,7 +449,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                 Подключение к КОМТЕТ Касса Курьер
               </h2>
               <p className="text-xs text-slate-500">
-                Реквизиты магазина, очереди и версия протокола заказов
+                Данные магазина и кассовой очереди из личного кабинета КОМТЕТ
               </p>
             </div>
           </div>
@@ -458,7 +458,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-5">
               <div className="sm:col-span-3">
                 <label className="mb-1 block text-xs font-medium text-slate-700">
-                  Базовый URL API КОМТЕТ
+                  Адрес сервиса КОМТЕТ Касса
                 </label>
                 <input
                   type="url"
@@ -471,7 +471,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
 
               <div className="sm:col-span-2">
                 <label className="mb-1 block text-xs font-medium text-slate-700">
-                  Версия API
+                  Версия интеграции
                 </label>
                 <select
                   value={komtetApiVersion}
@@ -480,8 +480,8 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                   }
                   className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                 >
-                  <option value="v2">API v2 (основная)</option>
-                  <option value="v1">API v1 (устаревшая)</option>
+                  <option value="v2">Версия 2 (рекомендуется)</option>
+                  <option value="v1">Версия 1 (устаревшая)</option>
                 </select>
               </div>
             </div>
@@ -489,20 +489,20 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <label className="mb-1 block text-xs font-medium text-slate-700">
-                  Shop ID (Идентификатор магазина)
+                  Идентификатор магазина
                 </label>
                 <input
                   type="text"
                   value={komtetShopId}
                   onChange={(e) => setKomtetShopId(e.target.value)}
-                  placeholder="Введите Shop ID"
+                  placeholder="Укажите ID магазина из ЛК КОМТЕТ"
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                 />
               </div>
 
               <div>
                 <label className="mb-1 block text-xs font-medium text-slate-700">
-                  Queue ID (ID очереди кассы)
+                  ID кассовой очереди
                 </label>
                 <input
                   type="number"
@@ -510,7 +510,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                   inputMode="numeric"
                   value={komtetQueueId}
                   onChange={(e) => setKomtetQueueId(e.target.value)}
-                  placeholder="Пусто — без привязки"
+                  placeholder="Необязательно"
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
                 />
               </div>
@@ -519,7 +519,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
             <div>
               <div className="mb-1 flex flex-wrap items-center justify-between gap-1.5">
                 <label className="text-xs font-medium text-slate-700">
-                  Secret Key (Секретный ключ магазина)
+                  Секретный ключ магазина
                 </label>
                 {settings?.has_komtet_secret_key && (
                   <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
@@ -534,8 +534,8 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                 onChange={(e) => setKomtetSecretKey(e.target.value)}
                 placeholder={
                   settings?.has_komtet_secret_key
-                    ? "Оставьте пустым, чтобы не менять сохраненный секрет"
-                    : "Введите Secret Key КОМТЕТ"
+                    ? "Оставьте пустым, чтобы не менять текущий ключ"
+                    : "Введите секретный ключ из ЛК КОМТЕТ"
                 }
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
               />
@@ -543,7 +543,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
 
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-700">
-                Публичный Callback URL для уведомлений от КОМТЕТ
+                Адрес для обратных уведомлений от КОМТЕТ
               </label>
               <div className="flex flex-col gap-2 sm:flex-row">
                 <input
@@ -566,7 +566,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                   ) : (
                     <>
                       <Copy className="h-3.5 w-3.5" />
-                      Скопировать URL
+                      Скопировать
                     </>
                   )}
                 </button>
@@ -587,7 +587,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
               Фискализация, доставка и защита
             </h2>
             <p className="text-xs text-slate-500">
-              Параметры 54-ФЗ (СНО, НДС, ИНН, место расчетов), интервалы доставки и защита вебхуков
+              Параметры чеков по 54-ФЗ, время доставки и защита обмена
             </p>
           </div>
         </div>
@@ -644,7 +644,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
 
           <div className="sm:col-span-2">
             <label className="mb-1 block text-xs font-medium text-slate-700">
-              Адрес расчетов (URL магазина)
+              Место расчётов (адрес сайта магазина)
             </label>
             <input
               type="text"
@@ -678,7 +678,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
 
           <div>
             <label className="mb-1 block text-xs font-medium text-slate-700">
-              Окно защиты от петли (сек)
+              Пауза против повторной отправки (сек.)
             </label>
             <input
               type="number"
@@ -699,7 +699,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                 Автоматическая синхронизация
               </div>
               <div className="text-xs text-slate-500">
-                Обрабатывать входящие вебхуки из RetailCRM в реальном времени
+                Автоматически передавать заказы в КОМТЕТ сразу после изменения статуса в RetailCRM
               </div>
             </div>
             <input
@@ -713,13 +713,10 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
           <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 hover:bg-slate-100/70">
             <div className="min-w-0">
               <div className="text-sm font-medium text-slate-900">
-                Проверять подпись X-HMAC-Signature
+                Проверять подлинность уведомлений от КОМТЕТ
               </div>
               <div className="text-xs text-slate-500">
-                Криптографическая проверка подлинности обратных вебхуков от КОМТЕТ Кассы.{" "}
-                <span className="font-medium text-slate-700">
-                  В окружении production подпись проверяется принудительно.
-                </span>
+                Защита от поддельных запросов (в рабочем режиме включена всегда).
               </div>
             </div>
             <input
@@ -758,7 +755,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
           ) : (
             <PlugZap className="h-4 w-4 shrink-0 text-blue-600" />
           )}
-          <span>Проверить подключение и инициализировать komtet_id</span>
+          <span>Проверить подключение</span>
         </button>
       </div>
 
@@ -775,7 +772,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                 <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
                 <div className="min-w-0 space-y-1">
                   <div className="font-semibold">
-                    Обратите внимание на предупреждения API:
+                    Обратите внимание на предупреждения:
                   </div>
                   <ul className="list-inside list-disc space-y-1 break-words text-xs">
                     {checkResult.warnings.map((w, idx) => (
@@ -792,7 +789,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
             <div className="rounded-xl border border-slate-200 p-4">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-medium text-slate-500">
-                  RetailCRM API v5
+                  Подключение к RetailCRM
                 </span>
                 {checkResult.retailcrm_ok ? (
                   <CheckCircle2 className="h-5 w-5 text-emerald-600" />
@@ -813,11 +810,11 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
               )}
             </div>
 
-            {/* Карточка 2: Поле komtet_id */}
+            {/* Карточка 2: Доп. поле */}
             <div className="rounded-xl border border-slate-200 p-4">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-medium text-slate-500">
-                  Поле {customFieldCode || "komtet_id"}
+                  Доп. поле для связи заказов
                 </span>
                 {checkResult.komtet_field_exists ? (
                   <CheckCircle2 className="h-5 w-5 text-emerald-600" />
@@ -833,7 +830,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                   : "Не проверено"}
               </div>
               <div className="mt-1 text-xs text-slate-600">
-                Дополнительное поле заказа в RetailCRM для связки с КОМТЕТ
+                Дополнительное поле заказа в RetailCRM для связи с КОМТЕТ
               </div>
             </div>
 
@@ -881,13 +878,13 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
                 {checkResult.komtet_delivery_service_active === true
                   ? "Услуга активна"
                   : checkResult.komtet_delivery_service_active === false
-                    ? "Требуется активация (SRV00)"
+                    ? "Услуга не подключена"
                     : "Не определено"}
               </div>
               <div className="mt-1 text-xs text-slate-600">
                 {checkResult.komtet_delivery_service_active === false
                   ? "Активируйте тариф «Курьерская доставка» в ЛК КОМТЕТ Кассы"
-                  : "Доступ к API заказов курьерской доставки"}
+                  : "Доступ к передаче заказов курьерам"}
               </div>
             </div>
           </div>

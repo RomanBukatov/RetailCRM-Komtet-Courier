@@ -61,23 +61,109 @@ function isHtmlPayload(text: string, contentType: string): boolean {
   );
 }
 
-function formatHttpHtmlError(status: number): string {
+const VALIDATION_FIELD_LABELS: Record<string, string> = {
+  retailcrm_url: "Адрес кабинета RetailCRM",
+  retailcrm_api_key: "API-ключ RetailCRM",
+  retailcrm_default_site: "Код магазина в RetailCRM по умолчанию",
+  komtet_base_url: "Адрес сервиса КОМТЕТ Касса",
+  komtet_shop_id: "Идентификатор магазина КОМТЕТ",
+  komtet_secret_key: "Секретный ключ магазина КОМТЕТ",
+  komtet_queue_id: "ID кассовой очереди",
+  komtet_api_version: "Версия интеграции КОМТЕТ",
+  tax_system: "Система налогообложения (СНО)",
+  default_vat: "Ставка НДС по умолчанию",
+  payment_address: "Место расчётов",
+  company_inn: "ИНН организации / ИП",
+  trigger_statuses: "Статусы для отправки заказа",
+  cancel_statuses: "Статусы отмены заказа",
+  final_status: "Статус после пробития чека",
+  default_delivery_time_from: "Время доставки «с»",
+  default_delivery_time_to: "Время доставки «до»",
+  komtet_callback_url: "Адрес для обратных уведомлений от КОМТЕТ",
+  verify_komtet_signature: "Проверка подлинности уведомлений",
+  anti_loop_seconds: "Пауза против повторной отправки",
+  auto_sync_enabled: "Автоматическая синхронизация",
+  komtet_custom_field_code: "Код доп. поля для номера заказа КОМТЕТ",
+  order_id: "ID заказа",
+  komtet_code: "Код в КОМТЕТ",
+  retailcrm_code: "Код в RetailCRM",
+  items: "Список соответствий",
+};
+
+function formatHttpStatusError(status: number): string {
   switch (status) {
+    case 400:
+      return "Некорректные данные";
+    case 401:
+      return "Неверный ключ доступа";
+    case 403:
+      return "Доступ запрещён";
+    case 404:
+      return "Данные не найдены";
+    case 422:
+      return "Проверьте правильность заполнения полей";
+    case 500:
+      return "Внутренняя ошибка сервера";
     case 502:
-      return "Ошибка сервера (HTTP 502): сервис временно недоступен";
     case 503:
-      return "Ошибка сервера (HTTP 503): сервис временно недоступен";
+      return "Сервис временно недоступен. Попробуйте повторить через минуту.";
     case 504:
-      return "Ошибка сервера (HTTP 504): превышено время ожидания ответа";
+      return "Превышено время ожидания ответа сервера.";
     default:
-      return `Ошибка сервера (HTTP ${status})`;
+      return `Ошибка при обращении к серверу (код ${status})`;
   }
+}
+
+function translateValidationField(loc: Array<string | number>): string {
+  const filtered = loc.filter(
+    (seg, idx) =>
+      !(
+        idx === 0 &&
+        typeof seg === "string" &&
+        ["body", "query", "path", "header"].includes(seg)
+      ),
+  );
+  if (filtered.length === 0) return "";
+  const lastStr = [...filtered]
+    .reverse()
+    .find((seg): seg is string => typeof seg === "string");
+  if (lastStr && VALIDATION_FIELD_LABELS[lastStr]) {
+    return VALIDATION_FIELD_LABELS[lastStr];
+  }
+  const fullPath = filtered.map(String).join(".");
+  return VALIDATION_FIELD_LABELS[fullPath] || "";
+}
+
+function translateValidationMessage(msg: string): string {
+  const cleaned = msg.replace(/^Value error,\s*/i, "").trim();
+  if (!cleaned) return "";
+  if (/^Input should be a valid integer/i.test(cleaned)) {
+    return "укажите целое число";
+  }
+  if (/^Input should be a valid number/i.test(cleaned)) {
+    return "укажите число";
+  }
+  if (/^Input should be a valid string/i.test(cleaned)) {
+    return "укажите текстовое значение";
+  }
+  if (/^Field required$/i.test(cleaned)) {
+    return "обязательное поле";
+  }
+  const gtMatch = cleaned.match(/^Input should be greater than or equal to (\d+)/i);
+  if (gtMatch) {
+    return `значение должно быть не меньше ${gtMatch[1]}`;
+  }
+  const ltMatch = cleaned.match(/^Input should be less than or equal to (\d+)/i);
+  if (ltMatch) {
+    return `значение должно быть не больше ${ltMatch[1]}`;
+  }
+  return cleaned;
 }
 
 function formatFastApiDetail(detail: unknown, status: number): string {
   if (typeof detail === "string") {
     const cleaned = detail.trim();
-    return cleaned || `Ошибка HTTP ${status}`;
+    return cleaned || formatHttpStatusError(status);
   }
   if (Array.isArray(detail)) {
     const parts = detail
@@ -86,19 +172,11 @@ function formatFastApiDetail(detail: unknown, status: number): string {
         if (entry && typeof entry === "object") {
           const item = entry as FastApiValidationItem;
           const rawMsg = typeof item.msg === "string" ? item.msg.trim() : "";
-          const cleanMsg = rawMsg.replace(/^Value error,\s*/i, "");
+          const cleanMsg = translateValidationMessage(rawMsg);
           const rawLoc = Array.isArray(item.loc) ? item.loc : [];
-          const filteredLoc = rawLoc.filter(
-            (seg, idx) =>
-              !(
-                idx === 0 &&
-                typeof seg === "string" &&
-                ["body", "query", "path", "header"].includes(seg)
-              ),
-          );
-          const fieldPath = filteredLoc.map(String).join(".");
-          if (fieldPath && cleanMsg) {
-            return `${fieldPath}: ${cleanMsg}`;
+          const fieldLabel = translateValidationField(rawLoc);
+          if (fieldLabel && cleanMsg) {
+            return `${fieldLabel}: ${cleanMsg}`;
           }
           if (cleanMsg) {
             return cleanMsg;
@@ -112,13 +190,9 @@ function formatFastApiDetail(detail: unknown, status: number): string {
     }
   }
   if (detail !== null && detail !== undefined) {
-    try {
-      return JSON.stringify(detail);
-    } catch {
-      return `Ошибка HTTP ${status}`;
-    }
+    return "Сервер вернул некорректный ответ. Попробуйте повторить действие.";
   }
-  return `Ошибка HTTP ${status}`;
+  return formatHttpStatusError(status);
 }
 
 async function apiFetch<T>(
@@ -148,7 +222,7 @@ async function apiFetch<T>(
     });
   } catch {
     throw new ApiError(
-      "Нет связи с сервером. Проверьте подключение и доступность API.",
+      "Нет связи с сервером. Проверьте подключение к интернету и попробуйте снова.",
       0,
     );
   }
@@ -173,18 +247,18 @@ async function apiFetch<T>(
 
   if (!response.ok) {
     if (htmlError) {
-      throw new ApiError(formatHttpHtmlError(response.status), response.status);
+      throw new ApiError(formatHttpStatusError(response.status), response.status);
     }
     const detail =
       data && typeof data === "object" && "detail" in data
         ? formatFastApiDetail((data as { detail: unknown }).detail, response.status)
-        : `Ошибка HTTP ${response.status}`;
+        : formatHttpStatusError(response.status);
     throw new ApiError(detail, response.status);
   }
 
   if (htmlError) {
     throw new ApiError(
-      `Неожиданный HTML-ответ от сервера (HTTP ${response.status})`,
+      "Сервер вернул неожиданный ответ. Обновите страницу или обратитесь к администратору.",
       response.status,
     );
   }

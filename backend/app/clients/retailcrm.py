@@ -382,6 +382,12 @@ class RetailCRMClient:
             "POST", f"/orders/payments/{encoded_id}/edit", form_data=form_data
         )
 
+    async def delete_payment(self, payment_id: int) -> dict[str, Any]:
+        """Delete an order payment by its internal ID."""
+        return await self._request(
+            "POST", f"/orders/payments/{payment_id}/delete", form_data={"by": "id"}
+        )
+
     # ------------------------------------------------------------------
     # Reference Dictionaries
     # ------------------------------------------------------------------

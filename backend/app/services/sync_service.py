@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -22,7 +22,11 @@ from app.clients.komtet import KomtetClient, KomtetError
 from app.clients.retailcrm import RetailCRMClient, RetailCRMError
 from app.config import get_app_timezone
 from app.models import OrderSync, SyncLog
-from app.services.mapper import map_retailcrm_order_to_komtet
+from app.services.mapper import (
+    _allocate_money,
+    _extract_item_raw_total,
+    map_retailcrm_order_to_komtet,
+)
 from app.services.settings_service import (
     MappingLookup,
     RuntimeConfig,
@@ -223,26 +227,8 @@ def _extract_komtet_id_from_order(order: dict[str, Any], field_code: str) -> Opt
         return None
 
 
-def _compute_callback_hash(
-    komtet_order_id: Optional[int],
-    state: str,
-    payment_type: str,
-    amount: Any,
-    items: list[dict[str, Any]],
-) -> str:
-    canonical = json.dumps(
-        {
-            "komtet_order_id": komtet_order_id,
-            "state": state,
-            "payment_type": payment_type,
-            "amount": str(amount) if amount is not None else None,
-            "items": items,
-        },
-        sort_keys=True,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        default=str,
-    )
+def _compute_callback_hash(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -372,7 +358,7 @@ def _reconcile_partial_redemption(
         return patch
 
     if goods_lines == 0:
-        if not has_delivery_in_cb and not has_zero_goods_line:
+        if callback_items and not has_delivery_in_cb and not has_zero_goods_line:
             return False, {}
         # Full refusal of all goods (client paid only delivery, or all goods qty == 0)
         edit_payload: dict[str, Any] = {"items": []}
@@ -389,8 +375,22 @@ def _reconcile_partial_redemption(
     updated_items: list[dict[str, Any]] = []
     items_changed = False
     remaining_before_order_discount = Decimal("0.00")
+    old_totals = [
+        _extract_item_raw_total(item, _to_quantity(item.get("quantity", 0)))
+        for item in crm_items
+    ]
+    # CRM line totals can already include the order-level discount. Add back
+    # its allocated share before deriving a replacement manual order discount.
+    net_totals = [total for total, _ in old_totals]
+    net_sum = sum(net_totals, _ZERO)
+    old_order_discount = crm_order_discount_amt
+    if 0 < crm_order_discount_pct < 100:
+        old_order_discount += net_sum * crm_order_discount_pct / (100 - crm_order_discount_pct)
+    discount_shares = _allocate_money(net_totals, old_order_discount)
 
-    for crm_item in crm_items:
+    for crm_item, (old_total, includes_discounts), order_share in zip(
+        crm_items, old_totals, discount_shares
+    ):
         crm_id = str(crm_item.get("id")) if crm_item.get("id") is not None else ""
         offer = crm_item.get("offer") if isinstance(crm_item.get("offer"), dict) else {}
         crm_name = _crm_item_name(crm_item)
@@ -419,6 +419,9 @@ def _reconcile_partial_redemption(
                 item_patch["productName"] = crm_item["productName"]
             if crm_item.get("initialPrice") is not None:
                 item_patch["initialPrice"] = crm_item["initialPrice"]
+            price_type = crm_item.get("priceType")
+            if isinstance(price_type, dict) and price_type.get("code"):
+                item_patch["priceType"] = {"code": price_type["code"]}
             if crm_item.get("purchasePrice") is not None:
                 item_patch["purchasePrice"] = crm_item["purchasePrice"]
             if crm_item.get("vatRate") is not None:
@@ -431,13 +434,8 @@ def _reconcile_partial_redemption(
                 item_patch["discountManualPercent"] = crm_item["discountManualPercent"]
             updated_items.append(item_patch)
 
-            init_price = _to_decimal(crm_item.get("initialPrice", crm_item.get("price", 0)))
-            item_disc_amt = _to_decimal(crm_item.get("discountManualAmount", 0))
-            item_disc_pct = _to_decimal(crm_item.get("discountManualPercent", 0))
-            item_unit_net = max(
-                Decimal("0.00"),
-                init_price - item_disc_amt - (init_price * item_disc_pct / Decimal("100")),
-            )
+            before_order_discount = old_total + (order_share if includes_discounts else _ZERO)
+            item_unit_net = before_order_discount / old_qty if old_qty else _ZERO
             remaining_before_order_discount += (item_unit_net * new_qty).quantize(
                 _PENNY, rounding=ROUND_HALF_UP
             )
@@ -475,40 +473,80 @@ def _reconcile_partial_redemption(
     return items_changed, edit_payload
 
 
-def _resolve_crm_payment_type(
-    komtet_payment_type: str,
-    mappings: MappingLookup,
-) -> str:
-    if komtet_payment_type and komtet_payment_type in mappings.payments_komtet_to_crm:
-        return mappings.payments_komtet_to_crm[komtet_payment_type]
-    defaults = {
-        "card": "bank-card",
-        "cash": "cash",
-        "prepayment": "oplachen",
+def _receipt_items(payload: dict[str, Any]) -> Optional[list[dict[str, Any]]]:
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if not isinstance(item, dict) or "quantity" not in item:
+            return None
+        if not any(item.get(key) for key in ("external_id", "order_item_id", "name")):
+            return None
+        try:
+            qty = _to_quantity(item["quantity"])
+        except ValueError:
+            return None
+        value = item.get("total")
+        if value is None:
+            value = item.get("price")
+        if qty > 0 and _receipt_amount(value) is None:
+            return None
+    return items
+
+
+def _receipt_amount(value: Any) -> Optional[Decimal]:
+    try:
+        amount = Decimal(str(value))
+        if amount.is_finite() and amount >= 0 and amount == amount.quantize(_PENNY):
+            return amount
+    except InvalidOperation:
+        pass
+    return None
+
+
+def _receipt_payments(payload: dict[str, Any]) -> Optional[dict[str, Decimal]]:
+    receipt_info = payload.get("receipt_info")
+    rows = receipt_info.get("payments") if isinstance(receipt_info, dict) else None
+    if not isinstance(rows, list):
+        rows = payload.get("payments")
+    if not isinstance(rows, list):
+        return None
+    payments: dict[str, Decimal] = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get("type") not in ("cash", "card", "prepayment"):
+            return None
+        amount = _receipt_amount(row.get("sum", row.get("amount")))
+        if amount is None:
+            return None
+        payment_type = row["type"]
+        payments[payment_type] = payments.get(payment_type, _ZERO) + amount
+
+    if "prepayment" not in payments and payload.get("prepayment") is not None:
+        prepayment = _receipt_amount(payload["prepayment"])
+        if prepayment is None:
+            return None
+        payments["prepayment"] = prepayment
+    return payments
+
+
+def _receipt_total(items: list[dict[str, Any]]) -> Decimal:
+    return sum(
+        (_cb_item_total(item) for item in items if _to_quantity(item["quantity"]) > 0),
+        Decimal("0.00"),
+    )
+
+
+def _payments_match_total(payments: dict[str, Decimal], total: Decimal) -> bool:
+    credited = payments.get("prepayment", _ZERO)
+    return sum(payments.values(), _ZERO) - max(_ZERO, credited - total) == total
+
+
+def _item_quantities(items: list[dict[str, Any]]) -> dict[str, Decimal]:
+    return {
+        str(item["id"]): _to_quantity(item["quantity"])
+        for item in items
+        if _to_quantity(item["quantity"]) > 0
     }
-    return defaults.get(komtet_payment_type, "bank-card")
-
-
-def _pick_payment_to_settle(
-    payments: list[dict[str, Any]],
-    target_type: str,
-) -> Optional[dict[str, Any]]:
-    """Pick an existing unsettled payment to mark as paid instead of creating a new one.
-
-    Prefer a payment of the same type; otherwise reuse the first unsettled payment of any
-    type (switching its type). Creating an additional payment next to an unsettled one
-    would make the sum of order payments exceed the order total in RetailCRM.
-    """
-    candidates = [
-        p
-        for p in payments
-        if p.get("id") is not None
-        and str(p.get("status") or "").strip() in _SETTLEABLE_PAYMENT_STATUSES
-    ]
-    same_type = next((p for p in candidates if p.get("type") == target_type), None)
-    if same_type is not None:
-        return same_type
-    return candidates[0] if candidates else None
 
 
 # ---------------------------------------------------------------------------
@@ -938,7 +976,7 @@ async def _sync_retailcrm_to_komtet_locked(
         # Anti-loop guard for already completed final status
         if not force and (
             status == cfg.final_status
-            or (order_sync.sync_status == "completed" and order_sync.komtet_state == "done")
+            or (order_sync.sync_status in {"completed", "refund_required"} and order_sync.komtet_state == "done")
         ):
             logger.info(
                 "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=skipped "
@@ -1515,6 +1553,8 @@ async def sync_komtet_to_retailcrm(
     crm_client: Optional[RetailCRMClient] = None,
     require_signature: bool = False,
     signature_already_verified: bool = False,
+    komtet_client: Optional[KomtetClient] = None,
+    komtet_factory: Callable[[RuntimeConfig], KomtetClient] = build_komtet_client,
 ) -> dict[str, Any]:
     """Process KOMTET Kassa order callback: verify HMAC, reconcile items, record payment, finish order.
 
@@ -1547,10 +1587,6 @@ async def sync_komtet_to_retailcrm(
 
     raw_ext_id = payload.get("external_id") or payload.get("order_id")
     state = str(payload.get("state") or "").strip().lower()
-    callback_items = payload.get("items") if isinstance(payload.get("items"), list) else []
-    callback_payment_type = str(payload.get("payment_type") or "").strip().lower()
-    callback_amount = payload.get("amount")
-
     owns_crm = crm_client is None
     crm = crm_client
     order_sync: Optional[OrderSync] = None
@@ -1642,9 +1678,8 @@ async def sync_komtet_to_retailcrm(
                 komtet_order_id=komtet_order_id,
                 raw_ext_id=raw_ext_id,
                 state=state,
-                callback_items=callback_items,
-                callback_payment_type=callback_payment_type,
-                callback_amount=callback_amount,
+                komtet=komtet_client,
+                komtet_factory=komtet_factory,
             )
 
     except (RetailCRMError, KomtetError, ValueError) as exc:
@@ -1729,23 +1764,34 @@ async def _process_komtet_callback_locked(
     komtet_order_id: Optional[int],
     raw_ext_id: Any,
     state: str,
-    callback_items: list[dict[str, Any]],
-    callback_payment_type: str,
-    callback_amount: Any,
+    komtet: Optional[KomtetClient],
+    komtet_factory: Callable[[RuntimeConfig], KomtetClient],
 ) -> dict[str, Any]:
-    callback_hash = _compute_callback_hash(
-        komtet_order_id,
-        state,
-        callback_payment_type,
-        callback_amount,
-        callback_items,
-    )
+    if (
+        order_sync is not None
+        and order_sync.komtet_order_id is not None
+        and komtet_order_id is not None
+        and order_sync.komtet_order_id != komtet_order_id
+    ):
+        await _add_sync_log(
+            session,
+            direction="komtet_to_crm",
+            level="WARNING",
+            event_type="stale_callback_conflict",
+            retailcrm_order_id=retailcrm_order_id,
+            komtet_order_id=komtet_order_id,
+            message=f"Callback conflicts with active KOMTET order #{order_sync.komtet_order_id}",
+        )
+        await session.commit()
+        return {"status": "skipped", "reason": "stale_callback_conflict"}
+
+    callback_hash = _compute_callback_hash(payload)
 
     if (
         order_sync is not None
         and order_sync.last_komtet_callback_hash == callback_hash
         and order_sync.komtet_state == state
-        and order_sync.sync_status in {"completed", "paid", "canceled"}
+        and order_sync.sync_status in {"completed", "paid", "canceled", "refund_required"}
     ):
         logger.info(
             "[KOMTET->RCRM] komtet_id=%s order=%s state=%s -> partial_edit=False "
@@ -1814,108 +1860,164 @@ async def _process_komtet_callback_locked(
             "komtet_order_id": komtet_order_id,
         }
 
-    # Fetch RetailCRM order for partial redemption & payment reconciliation
+    async def pending(reason: str) -> dict[str, Any]:
+        order_sync.komtet_state = "done"
+        order_sync.sync_status = "pending_reconciliation"
+        order_sync.last_error = reason
+        await _add_sync_log(
+            session,
+            direction="komtet_to_crm",
+            level="WARNING",
+            event_type="pending_reconciliation",
+            retailcrm_order_id=retailcrm_order_id,
+            komtet_order_id=komtet_order_id,
+            message=reason,
+            payload=payload,
+        )
+        await session.commit()
+        return {"status": "pending_reconciliation", "reason": reason}
+
+    callback_items = _receipt_items(payload)
+    receipt_payments = _receipt_payments(payload)
+    komtet_order_id = komtet_order_id or order_sync.komtet_order_id
+    if (
+        callback_items is None or receipt_payments is None
+        or not _payments_match_total(receipt_payments, _receipt_total(callback_items))
+    ):
+        if komtet_order_id is None:
+            return await pending("KOMTET order ID is missing")
+        if komtet is None:
+            async with komtet_factory(cfg) as client:
+                detail = await client.get_order(komtet_order_id)
+        else:
+            detail = await komtet.get_order(komtet_order_id)
+        if detail.get("state") != "done" or str(detail.get("id")) != str(komtet_order_id):
+            return await pending("KOMTET order detail does not confirm the completed order")
+        detailed_items = _receipt_items(detail)
+        detailed_payments = _receipt_payments(detail)
+        if detailed_items is not None:
+            callback_items = detailed_items
+        if detailed_payments is not None:
+            receipt_payments = detailed_payments
+
+    if callback_items is None or receipt_payments is None:
+        return await pending("KOMTET did not provide complete items and payment breakdown")
+
+    final_total = _receipt_total(callback_items)
+    courier_payments = {
+        kind: amount for kind, amount in receipt_payments.items()
+        if kind != "prepayment" and amount > 0
+    }
+    courier_total = sum(courier_payments.values(), _ZERO)
+    credited = receipt_payments.get("prepayment", _ZERO)
+    if not _payments_match_total(receipt_payments, final_total):
+        return await pending("KOMTET payment breakdown does not match the receipt total")
+
     lookup_site = order_sync.retailcrm_site or (cfg.retailcrm_default_site or None)
     crm_resp = await crm.get_order(retailcrm_order_id, by="id", site=lookup_site)
     crm_order = crm_resp.get("order") or {}
     if not crm_order:
         raise RetailCRMError(f"RetailCRM order {retailcrm_order_id} not found", status_code=404)
 
-    # Compute the item patch before mutating anything (raises on unmatchable items).
     items_changed, edit_items_payload = _reconcile_partial_redemption(crm_order, callback_items)
-
-    # Persist anti-loop timestamp before mutating RetailCRM so synchronous
-    # RetailCRM triggers fired during edit_order/create_payment are ignored.
-    order_sync.last_komtet_callback_at = now
-    await session.commit()
-
-    site = crm_order.get("site") or order_sync.retailcrm_site or (cfg.retailcrm_default_site or None)
-    order_sync.retailcrm_order_number = (
-        str(crm_order.get("number") or "") or order_sync.retailcrm_order_number
-    )
+    expected_items = edit_items_payload.get("items", crm_order.get("items") or [])
+    site = crm_order.get("site") or lookup_site
+    order_sync.retailcrm_order_number = str(crm_order.get("number") or "") or order_sync.retailcrm_order_number
     order_sync.retailcrm_site = site or order_sync.retailcrm_site
 
-    # 1) Partial redemption: reconcile items if courier changed quantities or removed items
+    order_sync.last_komtet_callback_at = now
+    await session.commit()
     if items_changed:
         await crm.edit_order(retailcrm_order_id, edit_items_payload, by="id", site=site)
-
-    # 2) Compute final payable total and reconcile payment
-    if callback_items:
-        final_total = sum(
-            (
-                _cb_item_total(item)
-                for item in callback_items
-                if isinstance(item, dict) and _to_quantity(item.get("quantity", 0)) > _ZERO
-            ),
-            Decimal("0.00"),
-        )
-    elif callback_amount is not None:
-        final_total = _to_decimal(callback_amount)
-    else:
-        final_total = _to_decimal(crm_order.get("totalSumm", 0))
+        crm_order = (await crm.get_order(retailcrm_order_id, by="id", site=site)).get("order") or {}
+    if (
+        crm_order.get("totalSumm") is None
+        or abs(_to_decimal(crm_order["totalSumm"]) - final_total) > _PENNY
+        or _item_quantities(crm_order.get("items") or []) != _item_quantities(expected_items)
+    ):
+        return await pending("RetailCRM items or total do not match the fiscalized order")
 
     existing_payments = _extract_crm_payments(crm_order)
-    paid_payments_sum = sum(
-        (_to_decimal(p.get("amount", 0)) for p in existing_payments if p.get("status") == "paid"),
-        Decimal("0.00"),
+    payment_plan = {
+        kind: (mappings.payments_komtet_to_crm.get(kind, default_type), amount)
+        for kind, default_type in (("cash", "cash"), ("card", "bank-card"))
+        if (amount := courier_payments.get(kind, _ZERO)) > 0
+    }
+    prefix = f"komtet-{komtet_order_id}" if komtet_order_id else f"komtet-order-{retailcrm_order_id}"
+    paid_by_external_id = {
+        p.get("externalId"): p for p in existing_payments if p.get("status") == "paid"
+    }
+    already_recorded = _ZERO
+    for kind, (payment_type, amount) in payment_plan.items():
+        existing = paid_by_external_id.get(f"{prefix}-{kind}") or paid_by_external_id.get(prefix)
+        if existing:
+            if existing.get("type") != payment_type or _to_decimal(existing.get("amount")) != amount:
+                return await pending("Existing RetailCRM courier payment differs from the receipt")
+            already_recorded += amount
+
+    paid_sum = sum(
+        (_to_decimal(p.get("amount")) for p in existing_payments if p.get("status") == "paid"),
+        _ZERO,
     )
-    prepay_sum = _to_decimal(crm_order.get("prepaySum", 0))
-    already_paid = max(paid_payments_sum, prepay_sum)
-    remaining_to_pay = max(Decimal("0.00"), final_total - already_paid)
-    overpaid = max(Decimal("0.00"), already_paid - final_total)
+    already_paid = max(paid_sum, _to_decimal(crm_order.get("prepaySum")))
+    paid_before_courier = already_paid - already_recorded
+    overpaid = max(_ZERO, paid_before_courier + courier_total - final_total)
+    if paid_before_courier + _PENNY < min(credited, final_total):
+        return await pending("RetailCRM does not confirm the prepayment credited by KOMTET")
 
-    target_crm_payment_type = _resolve_crm_payment_type(callback_payment_type, mappings)
-    paid_at_str = datetime.now(get_app_timezone(cfg.app_timezone)).strftime("%Y-%m-%d %H:%M:%S")
-    payment_action = "none"
+    actions: list[str] = []
+    if not overpaid and courier_total > already_recorded:
+        planned_types = {payment_type for payment_type, _ in payment_plan.values()}
+        for payment in existing_payments:
+            if (
+                payment.get("id") is not None
+                and payment.get("status") in ("", "not-paid", None)
+                and payment.get("type") not in planned_types
+            ):
+                await crm.delete_payment(payment["id"])
 
-    if remaining_to_pay > Decimal("0.00"):
-        to_settle = _pick_payment_to_settle(existing_payments, target_crm_payment_type)
-        if to_settle is not None:
-            payment_patch: dict[str, Any] = {
-                "id": to_settle["id"],
+        used_payment_ids = set()
+        paid_at = datetime.now(get_app_timezone(cfg.app_timezone)).strftime("%Y-%m-%d %H:%M:%S")
+        for kind, (payment_type, amount) in payment_plan.items():
+            external_id = f"{prefix}-{kind}"
+            if external_id in paid_by_external_id or prefix in paid_by_external_id:
+                continue
+            patch = {
+                "externalId": external_id,
+                "amount": float(amount),
                 "status": "paid",
-                "amount": float(remaining_to_pay),
-                "paidAt": paid_at_str,
+                "paidAt": paid_at,
             }
-            if to_settle.get("type") != target_crm_payment_type:
-                payment_patch["type"] = target_crm_payment_type
-            await crm.update_payment(to_settle["id"], payment_patch, by="id", site=site)
-            payment_action = "updated"
-        else:
-            payment_external_id = (
-                f"komtet-{komtet_order_id}"
-                if komtet_order_id is not None
-                else f"komtet-order-{retailcrm_order_id}"
-            )
-            await crm.create_payment(
-                {
-                    "externalId": payment_external_id,
-                    "order": {"id": retailcrm_order_id},
-                    "type": target_crm_payment_type,
-                    "status": "paid",
-                    "amount": float(remaining_to_pay),
-                    "paidAt": paid_at_str,
-                    "comment": f"Оплата через КОМТЕТ Касса (заказ #{komtet_order_id})",
-                },
-                site=site,
-            )
-            payment_action = "created"
+            candidate = next((
+                p for p in existing_payments
+                if p.get("id") is not None and p["id"] not in used_payment_ids
+                and p.get("type") == payment_type
+                and str(p.get("status") or "").strip() in _SETTLEABLE_PAYMENT_STATUSES
+                and p.get("externalId") in (None, "", external_id)
+            ), None)
+            if candidate:
+                await crm.update_payment(candidate["id"], patch, by="id", site=site)
+                used_payment_ids.add(candidate["id"])
+                actions.append("updated")
+            else:
+                await crm.create_payment(
+                    {**patch, "order": {"id": retailcrm_order_id}, "type": payment_type},
+                    site=site,
+                )
+                actions.append("created")
 
-    # 3) Move RetailCRM order to final status (default: 'complete')
+    payment_action = "+".join(actions) or "none"
+    remaining_to_pay = courier_total - already_recorded
+    target_crm_payment_type = "+".join(code for code, _ in payment_plan.values())
     final_status_applied = False
-    if cfg.final_status and crm_order.get("status") != cfg.final_status:
-        await crm.edit_order(
-            retailcrm_order_id,
-            {"status": cfg.final_status},
-            by="id",
-            site=site,
-        )
+    if not overpaid and cfg.final_status and crm_order.get("status") != cfg.final_status:
+        await crm.edit_order(retailcrm_order_id, {"status": cfg.final_status}, by="id", site=site)
         final_status_applied = True
 
     # 4) Update OrderSync (recording timestamp for anti-loop) & SyncLog
     order_sync.komtet_order_id = komtet_order_id or order_sync.komtet_order_id
     order_sync.komtet_state = "done"
-    order_sync.sync_status = "completed"
+    order_sync.sync_status = "refund_required" if overpaid else "completed"
     order_sync.last_komtet_callback_hash = callback_hash
     order_sync.last_komtet_callback_at = _utc_now()
     order_sync.last_synced_at = now
@@ -1949,7 +2051,7 @@ async def _process_komtet_callback_locked(
         session,
         direction="komtet_to_crm",
         level="WARNING" if overpaid > Decimal("0.00") else "INFO",
-        event_type="callback_processed",
+        event_type="refund_required" if overpaid else "callback_processed",
         retailcrm_order_id=retailcrm_order_id,
         komtet_order_id=komtet_order_id,
         message=(
@@ -1962,7 +2064,7 @@ async def _process_komtet_callback_locked(
     )
     await session.commit()
     return {
-        "status": "processed",
+        "status": "refund_required" if overpaid else "processed",
         "retailcrm_order_id": retailcrm_order_id,
         "komtet_order_id": komtet_order_id,
         "items_changed": items_changed,

@@ -218,7 +218,9 @@ class KomtetClient:
             try:
                 response = await self._client.send(request, follow_redirects=follow_redirects)
             except httpx.TransportError as exc:
-                if attempt < total_retries:
+                if attempt < total_retries and (
+                    upper_method != "POST" or isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+                ):
                     delay = self._retry_delays[attempt]
                     logger.warning(
                         "[KOMTET] retry %d/%d after %s %s -> %s (delay=%.1fs)",
@@ -259,7 +261,8 @@ class KomtetClient:
                     is_transient=True,
                 ) from exc
 
-            if response.status_code in RETRYABLE_HTTP_STATUSES and attempt < total_retries:
+            retryable_statuses = {429} if upper_method == "POST" else RETRYABLE_HTTP_STATUSES
+            if response.status_code in retryable_statuses and attempt < total_retries:
                 delay = self._retry_delays[attempt]
                 logger.warning(
                     "[KOMTET] retry %d/%d after %s %s -> %s (delay=%.1fs)",

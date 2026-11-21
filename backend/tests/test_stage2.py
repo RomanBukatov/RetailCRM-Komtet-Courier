@@ -28,6 +28,7 @@ from app.models import Mapping, OrderSync, Setting, SyncLog  # noqa: E402
 from app.routers import admin_api, webhooks  # noqa: E402
 from app.security import validate_outbound_url  # noqa: E402
 from app.services.mapper import (  # noqa: E402
+    _distribute_discount,
     build_delivery_address,
     build_delivery_window,
     map_retailcrm_order_to_komtet,
@@ -219,8 +220,8 @@ def test_mapper_discounts_penny_exact_split_delivery_and_prepayment() -> None:
     assert payload["company"]["sno"] == 0
     assert payload["courier_id"] == 701
     assert payload["client"]["phone"] == "+79161112233"
-    assert payload["date_start"] == "2026-11-21 10:00"
-    assert payload["date_end"] == "2026-11-21 14:00"
+    assert payload["date_start"] == "21.11.2026 10:00"
+    assert payload["date_end"] == "21.11.2026 14:00"
     assert payload["prepayment"] == 200.0
     assert payload["is_pay_to_courier"] is True
     assert payload["payment_type"] == "card"
@@ -444,6 +445,9 @@ async def test_reverse_sync_partial_redemption_payment_idempotency_and_antiloop(
             form = parse_qs(request.content.decode("utf-8"))
             patch = json.loads(form["order"][0])
             crm_calls.append(("edit_order", request.url.path, patch))
+            if "items" in patch:
+                crm_order["items"] = patch["items"]
+                crm_order["totalSumm"] = 500.0
             if "status" in patch:
                 crm_order["status"] = patch["status"]
             return httpx.Response(200, json={"success": True, "id": 900})
@@ -464,8 +468,7 @@ async def test_reverse_sync_partial_redemption_payment_idempotency_and_antiloop(
         "id": 4455,
         "external_id": "900",
         "state": "done",
-        "payment_type": "card",
-        "amount": 500.0,
+        "payments": [{"type": "card", "sum": 500.0}],
         "items": [
             {
                 "id": 101,
@@ -580,8 +583,7 @@ async def test_reverse_sync_partial_redemption_payment_idempotency_and_antiloop(
             "id": 4456,
             "external_id": "901",
             "state": "done",
-            "payment_type": "cash",
-            "amount": 500.0,
+            "payments": [{"type": "cash", "sum": 500.0}],
             "items": [
                 {
                     "id": 101,
@@ -1252,7 +1254,7 @@ async def test_clients_retry_on_429_503_and_transport_error() -> None:
             retry_delays=(0.0, 0.0, 0.0),
             client=http_client,
         )
-        res = await komtet.create_order({"external_id": "42"})
+        res = await komtet.get_order(99)
         assert res["id"] == 99
         assert komtet_attempts == 3
 
@@ -1352,8 +1354,7 @@ async def test_idempotency_prepay_sum_done_guard_resolve_link_and_rollback(tmp_p
             "id": 5000,
             "external_id": "910",
             "state": "done",
-            "payment_type": "card",
-            "amount": 1000.0,
+            "payments": [{"type": "card", "sum": 600}, {"type": "prepayment", "sum": 400}],
             "items": [{"external_id": "1", "name": "Корм", "quantity": 1, "total": 1000.0, "type": "product"}],
         }
         raw_cb = json.dumps(cb).encode("utf-8")
@@ -1394,7 +1395,7 @@ async def test_idempotency_prepay_sum_done_guard_resolve_link_and_rollback(tmp_p
         assert ok_res["status"] == "processed"
         assert ok_res["payment_amount"] == 600.0
         assert len(created_payments) == 1
-        assert created_payments[0]["externalId"] == "komtet-5000"
+        assert created_payments[0]["externalId"] == "komtet-5000-card"
         assert created_payments[0]["amount"] == 600.0
         paid_dt = datetime.strptime(created_payments[0]["paidAt"], "%Y-%m-%d %H:%M:%S").replace(
             tzinfo=get_app_timezone("Europe/Moscow")
@@ -1580,7 +1581,11 @@ async def test_webhooks_http_503_retry_hmac_before_factory_proxy_ports_and_form_
 
         # 4) Transient 503 from RetailCRM during /webhooks/komtet -> HTTP 503 for retry
         mode["crm_503"] = True
-        done_body = json.dumps({"id": 6600, "external_id": "1500", "state": "done"})
+        done_body = json.dumps({
+            "id": 6600, "external_id": "1500", "state": "done",
+            "items": [{"external_id": "1", "quantity": 1, "total": 100}],
+            "payments": [{"type": "card", "sum": 100}],
+        })
         sig_done = KomtetClient.compute_signature(
             "test-komtet-secret-8888",
             "POST",
@@ -2257,7 +2262,7 @@ async def test_http_clients_structured_logging_and_no_secret_leak(
         if request.url.path == "/api/shop/v2/orders" and request.method == "POST":
             komtet_attempts["create"] += 1
             if komtet_attempts["create"] == 1:
-                return httpx.Response(503, text="Upstream busy")
+                return httpx.Response(429, text="Rate limited")
             return httpx.Response(200, json={"id": 500, "state": "new"})
         if request.url.path == "/api/shop/v2/orders/99" and request.method == "PUT":
             return httpx.Response(
@@ -2302,7 +2307,152 @@ async def test_http_clients_structured_logging_and_no_secret_leak(
     assert "[RetailCRM] GET /api/v5/orders/101 -> 200 (" in log_text
     assert "[RetailCRM] POST /api/v5/orders/101/edit -> 422 (" in log_text
     assert "[KOMTET] GET /api/shop/v2/queues/1 -> 200 (" in log_text
-    assert "[KOMTET] retry 1/1 after POST /api/shop/v2/orders -> 503 (delay=0.0s)" in log_text
+    assert "[KOMTET] retry 1/1 after POST /api/shop/v2/orders -> 429 (delay=0.0s)" in log_text
     assert "[KOMTET] POST /api/shop/v2/orders -> 200 (" in log_text
     assert "[KOMTET] PUT /api/shop/v2/orders/99 -> 422 (" in log_text
     assert "ms)" in log_text
+
+
+def test_delivery_payload_version_and_largest_remainder() -> None:
+    order = {"id": 1, "delivery": {"date": "2026-11-21"}}
+    for version, date_part in (("v1", "2026-11-21"), ("v2", "21.11.2026")):
+        payload, _ = map_retailcrm_order_to_komtet(
+            order, _sample_config(komtet_api_version=version), _sample_mappings()
+        )
+        assert payload["date_start"] == f"{date_part} 09:00"
+        assert payload["date_end"] == f"{date_part} 21:00"
+
+    lines = _distribute_discount([Decimal("1.00")] * 4, Decimal("0.02"))
+    assert lines == [Decimal("0.99")] * 2 + [Decimal("1.00")] * 2
+    assert sum(lines) == Decimal("3.98")
+
+
+@pytest.mark.asyncio
+async def test_create_order_does_not_retry_after_read_timeout() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout("Response lost", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = KomtetClient("shop", "secret", client=http, retry_delays=(0.0,))
+        with pytest.raises(KomtetError):
+            await client.create_order({"external_id": "42"})
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["mixed", "switch", "refund", "mismatch", "missing", "stale"])
+async def test_done_callback_reconciliation(tmp_path: Path, scenario: str) -> None:
+    engine = create_engine(f"sqlite+aiosqlite:///{(tmp_path / 'done.db').as_posix()}")
+    await init_db(engine, seed=True, env_settings=_test_env_settings())
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    calls = []
+    new_payments = []
+    order = {
+        "id": 42, "site": "main-site", "status": "delivering",
+        "totalSumm": 1200, "discountManualAmount": 100,
+        "items": [{
+            "id": 10, "quantity": 2, "initialPrice": 750, "discountTotal": 150,
+            "priceType": {"code": "retail"}, "offer": {"id": 1},
+        }],
+        "payments": {"20": {"id": 20, "type": "cash", "status": "not-paid"}},
+    }
+    if scenario == "refund":
+        order["payments"] = {"21": {"id": 21, "type": "online", "status": "paid", "amount": 700}}
+    payments = {
+        "mixed": [{"type": "cash", "sum": 300}, {"type": "card", "sum": 300}],
+        "switch": [{"type": "card", "sum": 600}],
+        "refund": [{"type": "prepayment", "sum": 600}],
+        "missing": [],
+    }.get(scenario, [{"type": "card", "sum": 600}])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        calls.append((request.method, path))
+        if request.method == "GET" and path == "/api/shop/v2/orders/99":
+            return httpx.Response(200, json={
+                "id": 99, "state": "done", "items": [{"external_id": "10", "quantity": 1, "total": 600}],
+                "receipt_info": {"payments": payments},
+            })
+        if path == "/api/v5/orders/42":
+            return httpx.Response(200, json={"success": True, "order": order})
+        form = parse_qs(request.content.decode())
+        if path == "/api/v5/orders/42/edit":
+            patch = json.loads(form["order"][0])
+            if "items" in patch:
+                assert patch["items"][0]["priceType"] == {"code": "retail"}
+                assert patch["discountManualAmount"] == 50
+                if scenario != "mismatch":
+                    order.update(items=patch["items"], totalSumm=600)
+            else:
+                order.update(patch)
+        elif path == "/api/v5/orders/payments/20/delete":
+            assert form == {"by": ["id"]}
+            del order["payments"]["20"]
+        elif path == "/api/v5/orders/payments/20/edit":
+            patch = json.loads(form["payment"][0])
+            assert "type" not in patch and "id" not in patch
+            order["payments"]["20"].update(patch)
+        elif path == "/api/v5/orders/payments/create":
+            payment = json.loads(form["payment"][0])
+            new_payments.append(payment)
+            order["payments"]["22"] = {**payment, "id": 22}
+        else:
+            pytest.fail(f"Unexpected endpoint {path}")
+        return httpx.Response(200, json={"success": True})
+
+    async with sessions() as session, httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        row = OrderSync(retailcrm_order_id=42, komtet_order_id=99, komtet_external_id="42")
+        session.add(row)
+        await session.commit()
+        crm = RetailCRMClient("https://example.retailcrm.ru", "key", client=http)
+        komtet = KomtetClient("shop", "secret", client=http)
+        payload = {"id": 98 if scenario == "stale" else 99, "external_id": "42", "state": "done"}
+
+        async def sync():
+            return await sync_komtet_to_retailcrm(
+                session, payload, crm_client=crm, komtet_client=komtet, signature_already_verified=True
+            )
+
+        result = await sync()
+        if scenario == "stale":
+            assert result == {"status": "skipped", "reason": "stale_callback_conflict"}
+            assert not calls and row.komtet_order_id == 99
+        else:
+            assert calls[0] == ("GET", "/api/shop/v2/orders/99")
+        if scenario in ("mixed", "switch"):
+            assert result["status"] == "processed"
+            assert calls[1:4] == [
+                ("GET", "/api/v5/orders/42"), ("POST", "/api/v5/orders/42/edit"),
+                ("GET", "/api/v5/orders/42"),
+            ]
+            assert new_payments[0]["externalId"] == "komtet-99-card"
+            assert new_payments[0]["type"] == "bank-card"
+            assert new_payments[0]["status"] == "paid"
+            if scenario == "mixed":
+                assert order["payments"]["20"]["externalId"] == "komtet-99-cash"
+                assert order["payments"]["20"]["amount"] == new_payments[0]["amount"] == 300
+            else:
+                assert calls[4:6] == [
+                    ("POST", "/api/v5/orders/payments/20/delete"),
+                    ("POST", "/api/v5/orders/payments/create"),
+                ]
+                assert new_payments[0]["amount"] == 600
+            # Simulate a retry after remote payment succeeded but the local hash was lost.
+            row.last_komtet_callback_hash = None
+            await session.commit()
+            assert (await sync())["payment_action"] == "none"
+            assert len(new_payments) == 1
+        elif scenario == "refund":
+            assert result["status"] == row.sync_status == "refund_required"
+            assert "100.00" in row.last_error
+        elif scenario in ("missing", "mismatch"):
+            assert result["status"] == row.sync_status == "pending_reconciliation"
+        if scenario not in ("mixed", "switch"):
+            assert not new_payments
+            assert order["status"] == "delivering"
+
+    await engine.dispose()

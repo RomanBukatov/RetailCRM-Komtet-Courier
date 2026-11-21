@@ -86,6 +86,12 @@ function getManualReasonLabel(reason: string): string {
 
 function getSyncStatusBadge(status: string) {
   switch (status) {
+    case "refund_required":
+      return (
+        <span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-semibold text-amber-800">
+          Требуется возврат
+        </span>
+      );
     case "completed":
       return (
         <span className="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700">
@@ -340,6 +346,7 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
               <option value="">Все статусы</option>
               <option value="synced">Синхронизирован</option>
               <option value="completed">Выполнен</option>
+              <option value="refund_required">Требуется возврат</option>
               <option value="canceled">Отменён</option>
               <option value="error">Ошибка</option>
               <option value="pending">В ожидании</option>

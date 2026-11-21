@@ -261,6 +261,7 @@ async def komtet_webhook(
     request: Request,
     db: AsyncSession = Depends(get_db),
     crm_factory: Callable[[RuntimeConfig], RetailCRMClient] = Depends(get_retailcrm_factory),
+    komtet_factory: Callable[[RuntimeConfig], KomtetClient] = Depends(get_komtet_factory),
     app_settings: Settings = Depends(get_app_settings),
 ) -> dict[str, Any]:
     """Handle incoming KOMTET Kassa order callback with X-HMAC-Signature verification."""
@@ -356,6 +357,7 @@ async def komtet_webhook(
                 crm_client=crm,
                 require_signature=app_settings.is_production,
                 signature_already_verified=True,
+                komtet_factory=komtet_factory,
             )
     except ValueError as exc:
         elapsed_ms = (time.perf_counter() - started_at) * 1000.0

@@ -328,55 +328,38 @@ def _distribute_discount(item_totals: list[Decimal], discount: Decimal) -> list[
         return list(item_totals)
 
     capped_discount = min(discount, total_sum)
-    result: list[Decimal] = []
-    accumulated = Decimal("0.00")
-    last_idx = len(item_totals) - 1
+    return [
+        line_total - share
+        for line_total, share in zip(item_totals, _allocate_money(item_totals, capped_discount))
+    ]
 
-    for idx, line_total in enumerate(item_totals):
-        if idx < last_idx:
-            share = _quantize_money(capped_discount * line_total / total_sum)
-            share = min(share, line_total)
-            accumulated += share
-            result.append(line_total - share)
-        else:
-            remainder = min(capped_discount - accumulated, line_total)
-            result.append(line_total - max(Decimal("0.00"), remainder))
 
-    return result
+def _allocate_money(line_totals: list[Decimal], amount: Decimal) -> list[Decimal]:
+    """Distribute whole kopecks by largest remainder, breaking ties by line order."""
+    cents = int(_quantize_money(amount) / _PENNY)
+    weights = [int(line_total / _PENNY) for line_total in line_totals]
+    total_weight = sum(weights)
+    if not total_weight:
+        return [Decimal("0.00")] * len(weights)
+    shares = [divmod(cents * weight, total_weight) for weight in weights]
+    remaining = cents - sum(whole for whole, _ in shares)
+    ranked = sorted(range(len(shares)), key=lambda index: -shares[index][1])
+    bonus = set(ranked[:remaining])
+    return [(whole + (index in bonus)) * _PENNY for index, (whole, _) in enumerate(shares)]
 
 
 def _reconcile_totals_to_target(item_totals: list[Decimal], target_sum: Decimal) -> list[Decimal]:
-    """Adjust item totals up or down so `sum(result) == target_sum` to the exact kopeck."""
     if not item_totals:
         return []
-    current_sum = sum(item_totals, Decimal("0.00"))
-    diff = current_sum - target_sum
-    if diff == Decimal("0.00"):
-        return list(item_totals)
-    if diff > Decimal("0.00"):
-        return _distribute_discount(item_totals, diff)
-
-    # current_sum < target_sum (e.g., 1-2 kopeck rounding loss from RetailCRM discountTotal)
-    surcharge = -diff
-    result: list[Decimal] = []
-    accumulated = Decimal("0.00")
-    last_idx = len(item_totals) - 1
-
-    if current_sum <= Decimal("0.00"):
-        result = list(item_totals)
-        result[last_idx] = _quantize_money(result[last_idx] + surcharge)
-        return result
-
-    for idx, line_total in enumerate(item_totals):
-        if idx < last_idx:
-            share = _quantize_money(surcharge * line_total / current_sum)
-            accumulated += share
-            result.append(line_total + share)
-        else:
-            remainder = surcharge - accumulated
-            result.append(line_total + remainder)
-
-    return result
+    current_sum = sum(item_totals)
+    if current_sum >= target_sum:
+        return _distribute_discount(item_totals, current_sum - target_sum)
+    if not current_sum:
+        return [*item_totals[:-1], target_sum]
+    return [
+        total + share
+        for total, share in zip(item_totals, _allocate_money(item_totals, target_sum - current_sum))
+    ]
 
 
 def _split_item_for_exact_total(
@@ -684,6 +667,8 @@ def map_retailcrm_order_to_komtet(
         if client_email:
             payload["client_email"] = client_email
     else:
+        date_start = datetime.strptime(date_start, "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
+        date_end = datetime.strptime(date_end, "%Y-%m-%d %H:%M").strftime("%d.%m.%Y %H:%M")
         client_obj: dict[str, Any] = {
             "address": client_address,
             "phone": client_phone,

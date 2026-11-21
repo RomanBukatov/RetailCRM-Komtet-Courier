@@ -76,6 +76,15 @@ const FALLBACK_PAYMENT_TYPES: Array<{ code: string; name: string }> = [
   { code: "oplachen", name: "Оплачен (предоплата)" },
 ];
 
+const FALLBACK_DELIVERY_TYPES: Array<{
+  code: string;
+  name: string;
+  active?: boolean;
+}> = [
+  { code: "courier", name: "Курьерская доставка", active: true },
+  { code: "self-delivery", name: "Самовывоз", active: true },
+];
+
 const KOMTET_EMPLOYEE_TYPE_LABELS: Record<string, string> = {
   courier: "курьер",
   cashier: "кассир",
@@ -111,6 +120,9 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
 
   const [triggerStatuses, setTriggerStatuses] = useState<string[]>([]);
   const [cancelStatuses, setCancelStatuses] = useState<string[]>([]);
+  const [allowedDeliveryCodes, setAllowedDeliveryCodes] = useState<string[]>(
+    [],
+  );
   const [finalStatus, setFinalStatus] = useState<string>("complete");
 
   // Directional mapping states: retailcrm_code -> komtet_code
@@ -139,6 +151,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
     if (!settings) return;
     setTriggerStatuses(settings.trigger_statuses || []);
     setCancelStatuses(settings.cancel_statuses || []);
+    setAllowedDeliveryCodes(settings.allowed_delivery_codes || []);
     setFinalStatus(settings.final_status || "complete");
   }, [settings]);
 
@@ -230,6 +243,40 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
     }
     return Array.from(map.values());
   }, [dictionaries, triggerStatuses, cancelStatuses, finalStatus]);
+
+  // Merge delivery types from dictionaries (or fallback) with any already saved allowedDeliveryCodes
+  const deliveryTypesList = useMemo(() => {
+    const base =
+      dictionaries?.retailcrm_delivery_types &&
+      dictionaries.retailcrm_delivery_types.length > 0
+        ? dictionaries.retailcrm_delivery_types
+        : FALLBACK_DELIVERY_TYPES;
+
+    const map = new Map<
+      string,
+      { code: string; name: string; active: boolean }
+    >();
+    for (const dt of base) {
+      const code = (dt.code || "").trim();
+      if (!code || map.has(code)) continue;
+      map.set(code, {
+        code,
+        name: dt.name || code,
+        active: dt.active !== false,
+      });
+    }
+    for (const code of allowedDeliveryCodes) {
+      const trimmed = (code || "").trim();
+      if (trimmed && !map.has(trimmed)) {
+        map.set(trimmed, { code: trimmed, name: trimmed, active: true });
+      }
+    }
+
+    const items = Array.from(map.values());
+    const activeItems = items.filter((dt) => dt.active);
+    const inactiveItems = items.filter((dt) => !dt.active);
+    return [...activeItems, ...inactiveItems];
+  }, [dictionaries, allowedDeliveryCodes]);
 
   // Merge payment types from dictionaries (or fallback) with any extra persisted DB payment mappings
   const paymentTypesList = useMemo(() => {
@@ -455,6 +502,7 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
       const updatedSettings = await api.updateSettings({
         trigger_statuses: triggerStatuses,
         cancel_statuses: cancelStatuses,
+        allowed_delivery_codes: allowedDeliveryCodes,
         final_status: finalStatus.trim() || "complete",
       });
 
@@ -650,22 +698,96 @@ export const MappingsTab: React.FC<MappingsTabProps> = ({
           </div>
         </div>
 
-        {/* Финальный статус */}
-        <div className="mt-4 max-w-md">
-          <label className="mb-1 block text-xs font-semibold text-slate-700">
-            Статус заказа в RetailCRM после пробития чека
-          </label>
-          <select
-            value={finalStatus}
-            onChange={(e) => setFinalStatus(e.target.value)}
-            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-          >
-            {statusesList.map((st) => (
-              <option key={st.code} value={st.code}>
-                {st.name}
-              </option>
-            ))}
-          </select>
+        {/* Финальный статус и типы доставки */}
+        <div className="mt-5 grid grid-cols-1 gap-5 border-t border-slate-100 pt-5 sm:gap-6 lg:grid-cols-2">
+          <div>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-slate-700">
+                Типы доставки для передачи в КОМТЕТ (
+                {allowedDeliveryCodes.length})
+              </span>
+              {allowedDeliveryCodes.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setAllowedDeliveryCodes([])}
+                  className="text-xs font-medium text-blue-600 hover:text-blue-700"
+                >
+                  Сбросить
+                </button>
+              )}
+            </div>
+            <div className="max-h-60 space-y-1.5 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50/50 p-2.5 sm:p-3">
+              {deliveryTypesList.map((dt) => {
+                const checked = allowedDeliveryCodes.includes(dt.code);
+                return (
+                  <label
+                    key={dt.code}
+                    className={`flex cursor-pointer items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-xs transition sm:py-1.5 ${
+                      checked
+                        ? "bg-blue-50 font-medium text-blue-900"
+                        : "text-slate-700 hover:bg-slate-100"
+                    }`}
+                  >
+                    <div className="flex min-w-0 flex-1 items-start gap-2 sm:items-center">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() =>
+                          toggleStatusInList(
+                            dt.code,
+                            allowedDeliveryCodes,
+                            setAllowedDeliveryCodes,
+                          )
+                        }
+                        className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600 sm:mt-0"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="break-words sm:truncate">
+                            {dt.name}
+                          </span>
+                          {!dt.active && (
+                            <span className="rounded bg-slate-200 px-1.5 py-0.5 text-[10px] font-medium text-slate-600">
+                              неактивен
+                            </span>
+                          )}
+                        </div>
+                        <div className="truncate font-mono text-[10px] text-slate-400 sm:hidden">
+                          {dt.code}
+                        </div>
+                      </div>
+                    </div>
+                    <span className="hidden shrink-0 font-mono text-[11px] text-slate-400 sm:inline">
+                      {dt.code}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+            <p className="mt-1.5 text-[11px] text-slate-500">
+              Если ничего не выбрано — передаются все типы доставки
+            </p>
+          </div>
+
+          <div className="max-w-md lg:max-w-none">
+            <label className="mb-2 block text-xs font-semibold text-slate-700">
+              Статус заказа в RetailCRM после пробития чека
+            </label>
+            <select
+              value={finalStatus}
+              onChange={(e) => setFinalStatus(e.target.value)}
+              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+            >
+              {statusesList.map((st) => (
+                <option key={st.code} value={st.code}>
+                  {st.name}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1.5 text-[11px] text-slate-500">
+              Устанавливается автоматически после успешной фискализации заказа курьером в КОМТЕТ Кассе
+            </p>
+          </div>
         </div>
       </div>
 

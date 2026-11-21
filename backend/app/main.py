@@ -29,6 +29,24 @@ _LOG_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
 _LOG_CLEANUP_RETRY_SECONDS = 600
 
 
+class _HealthCheckAccessFilter(logging.Filter):
+    """Drop successful liveness probe entries from uvicorn.access logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple) and len(record.args) >= 5:
+            method, path, status_code = record.args[1], record.args[2], record.args[4]
+            if method == "GET" and path == "/health" and status_code == 200:
+                return False
+        msg = record.getMessage()
+        return not ('"GET /health ' in msg and msg.rstrip().endswith("200"))
+
+
+def _install_access_log_filter() -> None:
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _HealthCheckAccessFilter) for f in access_logger.filters):
+        access_logger.addFilter(_HealthCheckAccessFilter())
+
+
 async def _log_retention_loop(retention_days: int) -> None:
     """Periodically purge old sync_logs records and compact SQLite WAL."""
     while True:
@@ -55,6 +73,7 @@ async def _log_retention_loop(retention_days: int) -> None:
 async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
     """Initialize database schema and seed defaults on startup; dispose engine on shutdown."""
     cfg: Settings = getattr(application.state, "settings", settings)
+    _install_access_log_filter()
     logger.info("Starting %s (env=%s)", cfg.app_name, cfg.app_env)
     await init_db(seed=True, env_settings=cfg)
     cleanup_task: asyncio.Task[None] | None = None

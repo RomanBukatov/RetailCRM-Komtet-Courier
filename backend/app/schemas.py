@@ -52,6 +52,7 @@ class SettingsResponse(BaseModel):
     company_inn: str = ""
     trigger_statuses: list[str] = Field(default_factory=list)
     cancel_statuses: list[str] = Field(default_factory=list)
+    allowed_delivery_codes: list[str] = Field(default_factory=list)
     final_status: str = "complete"
     default_delivery_time_from: str = "09:00"
     default_delivery_time_to: str = "21:00"
@@ -80,6 +81,7 @@ class SettingsUpdateRequest(BaseModel):
     company_inn: Optional[str] = None
     trigger_statuses: Optional[list[str]] = None
     cancel_statuses: Optional[list[str]] = None
+    allowed_delivery_codes: Optional[list[str]] = None
     final_status: Optional[str] = None
     default_delivery_time_from: Optional[str] = None
     default_delivery_time_to: Optional[str] = None
@@ -155,6 +157,7 @@ class DictionariesResponse(BaseModel):
     retailcrm_payment_types: list[dict[str, Any]] = Field(default_factory=list)
     retailcrm_couriers: list[dict[str, Any]] = Field(default_factory=list)
     retailcrm_sites: list[dict[str, Any]] = Field(default_factory=list)
+    retailcrm_delivery_types: list[dict[str, Any]] = Field(default_factory=list)
     komtet_employees: list[dict[str, Any]] = Field(default_factory=list)
     komtet_couriers: list[dict[str, Any]] = Field(default_factory=list)
     komtet_queue: Optional[dict[str, Any]] = None

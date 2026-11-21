@@ -917,6 +917,39 @@ async def _sync_retailcrm_to_komtet_locked(
                 "crm_status": status,
             }
 
+        # Check allowed delivery types allowlist (empty list = allow all delivery types)
+        if not ignore_status_filter and cfg.allowed_delivery_codes:
+            delivery_obj = order.get("delivery") if isinstance(order.get("delivery"), dict) else {}
+            delivery_code = str(delivery_obj.get("code") or "").strip()
+            if delivery_code not in cfg.allowed_delivery_codes:
+                if order_sync in session.new:
+                    session.expunge(order_sync)
+                await _add_sync_log(
+                    session,
+                    direction="crm_to_komtet",
+                    level="INFO",
+                    event_type="delivery_type_not_allowed",
+                    retailcrm_order_id=order_id,
+                    komtet_order_id=komtet_id,
+                    message=(
+                        f"CRM delivery type '{delivery_code or 'none'}' is not in "
+                        f"allowed_delivery_codes ({', '.join(cfg.allowed_delivery_codes)})"
+                    ),
+                    payload={
+                        "trigger_event": trigger_event,
+                        "crm_status": status,
+                        "delivery_code": delivery_code,
+                        "allowed_delivery_codes": cfg.allowed_delivery_codes,
+                    },
+                )
+                await session.commit()
+                return {
+                    "status": "skipped",
+                    "reason": "delivery_type_not_allowed",
+                    "retailcrm_order_id": order_id,
+                    "delivery_code": delivery_code,
+                }
+
         # Order canceled on the KOMTET side (e.g. by courier): never silently re-create it.
         if (
             not force
@@ -1239,7 +1272,7 @@ async def _sync_retailcrm_to_komtet_locked(
 async def verify_komtet_callback_signature(
     session: AsyncSession,
     cfg: RuntimeConfig,
-    payload: dict[str, Any],
+    payload: Optional[dict[str, Any]] = None,
     *,
     signature: str = "",
     raw_url: str = "",
@@ -1255,7 +1288,7 @@ async def verify_komtet_callback_signature(
     if not (cfg.verify_komtet_signature or require_signature):
         return
 
-    body_text = raw_body.decode("utf-8") if raw_body else ""
+    body_text = raw_body.decode("utf-8", errors="replace") if raw_body else ""
     urls_to_check: list[str] = []
 
     base_candidates: list[str] = []
@@ -1277,6 +1310,7 @@ async def verify_komtet_callback_signature(
         for url in urls_to_check
     )
     if not is_valid:
+        safe_payload = payload if isinstance(payload, dict) else {}
         await _add_sync_log(
             session,
             direction="komtet_to_crm",
@@ -1284,8 +1318,8 @@ async def verify_komtet_callback_signature(
             event_type="signature_invalid",
             message="Rejected KOMTET callback due to invalid X-HMAC-Signature",
             payload={
-                "komtet_id": payload.get("id"),
-                "external_id": payload.get("external_id"),
+                "komtet_id": safe_payload.get("id"),
+                "external_id": safe_payload.get("external_id"),
                 "checked_urls": urls_to_check,
             },
         )

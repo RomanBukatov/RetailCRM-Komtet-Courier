@@ -669,6 +669,17 @@ async def test_webhooks_and_admin_api_endpoints(tmp_path: Path) -> None:
                 200,
                 json={"success": True, "sites": {"main-site": {"code": "main-site", "name": "Main Store"}}},
             )
+        if request.url.path == "/api/v5/reference/delivery-types":
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "deliveryTypes": {
+                        "courier": {"code": "courier", "name": "Курьер", "active": True},
+                        "self-delivery": {"code": "self-delivery", "name": "Самовывоз", "active": True},
+                    },
+                },
+            )
         if request.url.path == "/api/v5/orders/1200" and request.method == "GET":
             return httpx.Response(
                 200,
@@ -784,6 +795,7 @@ async def test_webhooks_and_admin_api_endpoints(tmp_path: Path) -> None:
         assert r_dict.status_code == 200
         dict_data = r_dict.json()
         assert len(dict_data["retailcrm_statuses"]) == 1
+        assert len(dict_data["retailcrm_delivery_types"]) == 2
         assert len(dict_data["komtet_employees"]) == 1
         assert any("SRV00" in w for w in dict_data["warnings"])
 
@@ -1786,3 +1798,275 @@ async def test_utc_datetime_serialization_courier_validation_and_clear_queue_id(
             assert ord_item[field].endswith("Z") or ord_item[field].endswith("+00:00")
 
     await engine.dispose()
+
+
+def test_normalize_phone_delimiters_and_customer_fallback() -> None:
+    """[HIGH #1] Multiple phones separated by ? / | and fallback when order.phone is invalid."""
+    from app.services.mapper import extract_client_phone
+
+    assert normalize_phone("89991112233? 89994445566") == "+79991112233"
+    assert normalize_phone("+79991112233? +79994445566") == "+79991112233"
+    assert normalize_phone("8 (999) 111-22-33 / 8 (916) 444-55-66") == "+79991112233"
+    assert normalize_phone("89991112233 | 89164445566") == "+79991112233"
+    assert normalize_phone("12345 / +7 916 555-00-11") == "+79165550011"
+    assert normalize_phone("4951234") == "+4951234"
+
+    # Concatenated >15 digits without supported delimiter must be rejected so fallback triggers
+    assert normalize_phone("89991112233 89994445566") == ""
+
+    order_with_bad_primary = {
+        "phone": "89991112233 89994445566",
+        "customer": {
+            "phones": [
+                {"number": "89991112233 89994445566"},
+                {"number": "+7 (916) 000-11-22"},
+            ]
+        },
+    }
+    assert extract_client_phone(order_with_bad_primary) == "+79160001122"
+
+
+@pytest.mark.asyncio
+async def test_allowed_delivery_codes_filtering(tmp_path: Path) -> None:
+    """[HIGH #2] Filter outbound sync by allowed_delivery_codes while allowing manual override."""
+    from app.services.settings_service import update_settings
+    from app.schemas import SettingsUpdateRequest
+
+    db_url = f"sqlite+aiosqlite:///{(tmp_path / 'deliv_filter.db').as_posix()}"
+    engine = create_engine(db_url)
+    await init_db(engine, seed=True, env_settings=_test_env_settings())
+    session_maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    orders_by_id: dict[int, dict[str, Any]] = {
+        315270: {
+            "id": 315270,
+            "number": "304237",
+            "site": "main-site",
+            "status": "new",
+            "phone": "+79161112233",
+            "summ": 3000.0,
+            "delivery": {"code": "self-delivery", "cost": 0, "address": {"text": "Самовывоз"}},
+            "items": [
+                {
+                    "id": 1,
+                    "initialPrice": 3000.0,
+                    "quantity": 1,
+                    "offer": {"id": 10, "name": "Корм", "vatRate": "10.00"},
+                }
+            ],
+            "customFields": {},
+        },
+        315271: {
+            "id": 315271,
+            "number": "304238",
+            "site": "main-site",
+            "status": "new",
+            "phone": "+79161112244",
+            "summ": 1500.0,
+            "delivery": {"code": "courier", "cost": 300.0, "address": {"text": "Москва, Арбат 1"}},
+            "items": [
+                {
+                    "id": 2,
+                    "initialPrice": 1500.0,
+                    "quantity": 1,
+                    "offer": {"id": 11, "name": "Поводок", "vatRate": "10.00"},
+                }
+            ],
+            "customFields": {},
+        },
+    }
+    komtet_posts: list[dict[str, Any]] = []
+
+    def crm_handler(request: httpx.Request) -> httpx.Response:
+        for oid, ord_data in orders_by_id.items():
+            if request.url.path == f"/api/v5/orders/{oid}" and request.method == "GET":
+                return httpx.Response(200, json={"success": True, "order": ord_data})
+            if request.url.path == f"/api/v5/orders/{oid}/edit" and request.method == "POST":
+                return httpx.Response(200, json={"success": True, "id": oid})
+        return httpx.Response(404, json={"success": False})
+
+    def komtet_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/api/shop/v2/orders":
+            body = json.loads(request.content.decode("utf-8"))
+            komtet_posts.append(body)
+            return httpx.Response(
+                200,
+                json={"id": 9100 + len(komtet_posts), "external_id": body["external_id"], "state": "new"},
+            )
+        return httpx.Response(200, json={})
+
+    async with (
+        session_maker() as db,
+        httpx.AsyncClient(transport=httpx.MockTransport(crm_handler)) as crm_http,
+        httpx.AsyncClient(transport=httpx.MockTransport(komtet_handler)) as k_http,
+    ):
+        crm_cli = RetailCRMClient("https://example.retailcrm.ru", "k", client=crm_http)
+        komtet_cli = KomtetClient("test-shop-id", "test-komtet-secret-8888", client=k_http)
+
+        # Configure allowlist = ["courier"]
+        await update_settings(
+            db,
+            SettingsUpdateRequest(allowed_delivery_codes=["courier"]),
+            env_settings=_test_env_settings(),
+        )
+
+        # 1) self-delivery order must be skipped with no KOMTET call and no phantom OrderSync row
+        res_skip = await sync_retailcrm_to_komtet(
+            db, 315270, crm_client=crm_cli, komtet_client=komtet_cli
+        )
+        assert res_skip["status"] == "skipped"
+        assert res_skip["reason"] == "delivery_type_not_allowed"
+        assert res_skip["delivery_code"] == "self-delivery"
+        assert len(komtet_posts) == 0
+
+        phantom_sync = await db.scalar(
+            select(OrderSync).where(OrderSync.retailcrm_order_id == 315270)
+        )
+        assert phantom_sync is None
+
+        skip_log = await db.scalar(
+            select(SyncLog)
+            .where(
+                SyncLog.retailcrm_order_id == 315270,
+                SyncLog.event_type == "delivery_type_not_allowed",
+            )
+            .order_by(SyncLog.id.desc())
+        )
+        assert skip_log is not None
+
+        # 2) courier order is created normally
+        res_ok = await sync_retailcrm_to_komtet(
+            db, 315271, crm_client=crm_cli, komtet_client=komtet_cli
+        )
+        assert res_ok["status"] == "created"
+        assert len(komtet_posts) == 1
+        assert komtet_posts[0]["external_id"] == "315271"
+
+        # 3) Manual override (`ignore_status_filter=True`) bypasses delivery filter
+        res_manual = await sync_retailcrm_to_komtet(
+            db,
+            315270,
+            trigger_event="manual",
+            force=True,
+            ignore_status_filter=True,
+            crm_client=crm_cli,
+            komtet_client=komtet_cli,
+        )
+        assert res_manual["status"] == "created"
+        assert len(komtet_posts) == 2
+
+        # 4) Empty allowlist [] allows all delivery types (backward compatibility)
+        await update_settings(
+            db,
+            SettingsUpdateRequest(allowed_delivery_codes=[]),
+            env_settings=_test_env_settings(),
+        )
+        orders_by_id[315272] = {
+            **orders_by_id[315270],
+            "id": 315272,
+            "number": "304239",
+        }
+        res_any = await sync_retailcrm_to_komtet(
+            db, 315272, crm_client=crm_cli, komtet_client=komtet_cli
+        )
+        assert res_any["status"] == "created"
+        assert len(komtet_posts) == 3
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_komtet_webhook_verifies_hmac_before_json_parsing_and_health_log_filter(
+    tmp_path: Path,
+) -> None:
+    """[LOW #8] Verify HMAC runs before JSON parsing and health filter drops GET /health 200."""
+    import logging
+    from app.main import _HealthCheckAccessFilter
+
+    db_url = f"sqlite+aiosqlite:///{(tmp_path / 'hmac_first.db').as_posix()}"
+    engine = create_engine(db_url)
+    prod_settings = _test_env_settings(
+        app_env="production",
+        admin_api_token="prod-admin-token",
+        retailcrm_webhook_token="prod-wh-token",
+    )
+    await init_db(engine, seed=True, env_settings=prod_settings)
+    session_maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    app = create_app(prod_settings)
+
+    async def override_get_db():
+        async with session_maker() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        # 1) Invalid JSON + missing/bad signature -> 401 (never 400)
+        r_bad_txt = await client.post(
+            "/webhooks/komtet",
+            content=b"not-json",
+            headers={"Content-Type": "application/json"},
+        )
+        assert r_bad_txt.status_code == 401
+
+        # 2) Non-UTF8 garbage + bad signature -> 401 (never 500 UnicodeDecodeError)
+        r_bad_bytes = await client.post(
+            "/webhooks/komtet",
+            content=b"\xff\xfe\xfd",
+            headers={"Content-Type": "application/json", "X-HMAC-Signature": "deadbeef"},
+        )
+        assert r_bad_bytes.status_code == 401
+
+        # 3) Valid HMAC over non-JSON body -> passes HMAC, rejected with 400 Invalid JSON payload
+        good_sig_bad_json = KomtetClient.compute_signature(
+            "test-komtet-secret-8888",
+            "POST",
+            "https://sync.example.com/webhooks/komtet",
+            "not-json",
+        )
+        r_valid_sig_bad_json = await client.post(
+            "/webhooks/komtet",
+            content=b"not-json",
+            headers={
+                "Content-Type": "application/json",
+                "X-HMAC-Signature": good_sig_bad_json,
+            },
+        )
+        assert r_valid_sig_bad_json.status_code == 400
+
+    await engine.dispose()
+
+    # Check _HealthCheckAccessFilter behavior
+    flt = _HealthCheckAccessFilter()
+    rec_health_200 = logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        "",
+        0,
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:1234", "GET", "/health", "1.1", 200),
+        None,
+    )
+    rec_api_200 = logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        "",
+        0,
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:1234", "GET", "/api/v1/health", "1.1", 200),
+        None,
+    )
+    rec_health_500 = logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        "",
+        0,
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:1234", "GET", "/health", "1.1", 500),
+        None,
+    )
+    assert flt.filter(rec_health_200) is False
+    assert flt.filter(rec_api_200) is True
+    assert flt.filter(rec_health_500) is True

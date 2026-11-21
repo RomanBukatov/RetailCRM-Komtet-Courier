@@ -334,6 +334,10 @@ class RetailCRMClient:
         """Fetch sites dictionary (`GET /api/v5/reference/sites`)."""
         return await self._request("GET", "/reference/sites")
 
+    async def get_delivery_types(self) -> dict[str, Any]:
+        """Fetch delivery types dictionary (`GET /api/v5/reference/delivery-types`)."""
+        return await self._request("GET", "/reference/delivery-types")
+
     # ------------------------------------------------------------------
     # Custom Fields
     # ------------------------------------------------------------------

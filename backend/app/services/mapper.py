@@ -37,21 +37,26 @@ def normalize_phone(raw_phone: Optional[str]) -> str:
     if not raw_phone:
         return ""
 
-    # RetailCRM fields can occasionally contain multiple comma/semicolon-separated numbers.
-    first_chunk = re.split(r"[,;]", str(raw_phone))[0].strip()
-    digits = re.sub(r"\D", "", first_chunk)
-    if not digits:
-        return ""
+    # RetailCRM fields can contain multiple numbers separated by commas, semicolons,
+    # slashes, pipes, newlines, or malformed `?` delimiters.
+    fallback_short = ""
+    for chunk in re.split(r"[,;/?|\n]+", str(raw_phone)):
+        digits = re.sub(r"\D", "", chunk.strip())
+        if len(digits) < 7 or len(digits) > 15:
+            continue
 
-    if len(digits) == 11 and digits.startswith("8"):
-        return f"+7{digits[1:]}"
-    if len(digits) == 11 and digits.startswith("7"):
-        return f"+{digits}"
-    if len(digits) == 10:
-        return f"+7{digits}"
-    if len(digits) >= 7:
-        return f"+{digits}"
-    return ""
+        if len(digits) == 11 and digits.startswith("8"):
+            return f"+7{digits[1:]}"
+        if len(digits) == 11 and digits.startswith("7"):
+            return f"+{digits}"
+        if len(digits) == 10:
+            return f"+7{digits}"
+        if 10 <= len(digits) <= 15:
+            return f"+{digits}"
+        if not fallback_short:
+            fallback_short = f"+{digits}"
+
+    return fallback_short
 
 
 def extract_client_phone(order: dict[str, Any]) -> str:

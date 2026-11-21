@@ -76,6 +76,7 @@ const VALIDATION_FIELD_LABELS: Record<string, string> = {
   company_inn: "ИНН организации / ИП",
   trigger_statuses: "Статусы для отправки заказа",
   cancel_statuses: "Статусы отмены заказа",
+  allowed_delivery_codes: "Типы доставки для передачи в КОМТЕТ",
   final_status: "Статус после пробития чека",
   default_delivery_time_from: "Время доставки «с»",
   default_delivery_time_to: "Время доставки «до»",

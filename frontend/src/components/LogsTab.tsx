@@ -37,6 +37,7 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
   order_update: "Обновление заказа",
   order_cancel: "Отмена заказа",
   sync_skipped: "Пропуск синхронизации",
+  delivery_type_not_allowed: "Тип доставки исключён",
   anti_loop_skipped: "Защита от повтора",
   komtet_link_resolved: "Связь с КОМТЕТ найдена",
   komtet_order_missing: "Заказ не найден в КОМТЕТ",
@@ -57,6 +58,7 @@ function getEventTypeLabel(eventType: string): string {
 function getLogBadge(item: SyncLogItem) {
   const skippedEvents = [
     "sync_skipped",
+    "delivery_type_not_allowed",
     "anti_loop_skipped",
     "callback_duplicate_skipped",
     "callback_state_update",

@@ -220,32 +220,18 @@ async def komtet_webhook(
 ) -> dict[str, Any]:
     """Handle incoming KOMTET Kassa order callback with X-HMAC-Signature verification."""
     raw_body = await request.body()
-    try:
-        payload = json.loads(raw_body.decode("utf-8"))
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid JSON payload",
-        ) from exc
-
-    if not isinstance(payload, dict):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Callback payload must be a JSON object",
-        )
-
     signature = request.headers.get("X-HMAC-Signature", "")
     candidate_urls = _build_candidate_urls(request)
     query_string = request.url.query
 
     cfg = await load_runtime_config(db, env_settings=app_settings)
 
-    # Verify HMAC signature BEFORE instantiating downstream RetailCRM HTTP clients.
+    # Verify HMAC signature against raw_body BEFORE parsing JSON or creating downstream clients.
     try:
         await verify_komtet_callback_signature(
             db,
             cfg,
-            payload,
+            payload=None,
             signature=signature,
             raw_url=str(request.url),
             candidate_urls=candidate_urls,
@@ -258,6 +244,20 @@ async def komtet_webhook(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(exc),
         ) from exc
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON payload",
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Callback payload must be a JSON object",
+        )
 
     try:
         async with crm_factory(cfg) as crm:

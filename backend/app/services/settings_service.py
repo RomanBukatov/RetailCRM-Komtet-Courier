@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
 from sqlalchemy import delete, func, select
@@ -47,6 +47,7 @@ class RuntimeConfig:
     auto_sync_enabled: bool
     komtet_custom_field_code: str
     app_timezone: str = "Europe/Moscow"
+    allowed_delivery_codes: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,7 @@ DEFAULT_CANCEL_STATUSES = [
     "otklonen",
     "ozhidaet-podtverzhdeniia-zakaza",
 ]
+DEFAULT_ALLOWED_DELIVERY_CODES: list[str] = []
 
 # Metadata for all known setting keys: (value_type, is_secret, description, default_value)
 SETTING_DEFINITIONS: dict[str, tuple[str, bool, str, Any]] = {
@@ -85,6 +87,12 @@ SETTING_DEFINITIONS: dict[str, tuple[str, bool, str, Any]] = {
     "company_inn": ("string", False, "ИНН организации/ИП", ""),
     "trigger_statuses": ("json", False, "Статусы RetailCRM для отправки в КОМТЕТ", DEFAULT_TRIGGER_STATUSES),
     "cancel_statuses": ("json", False, "Статусы отмены RetailCRM", DEFAULT_CANCEL_STATUSES),
+    "allowed_delivery_codes": (
+        "json",
+        False,
+        "Разрешённые коды типов доставки RetailCRM (пусто = любые)",
+        DEFAULT_ALLOWED_DELIVERY_CODES,
+    ),
     "final_status": ("string", False, "Финальный статус в RetailCRM после оплаты/чека", "complete"),
     "default_delivery_time_from": ("string", False, "Время доставки по умолчанию (с)", "09:00"),
     "default_delivery_time_to": ("string", False, "Время доставки по умолчанию (до)", "21:00"),
@@ -270,6 +278,10 @@ async def load_runtime_config(
     if not isinstance(cancel_statuses, list):
         cancel_statuses = list(DEFAULT_CANCEL_STATUSES)
 
+    allowed_delivery_codes = get_val("allowed_delivery_codes")
+    if not isinstance(allowed_delivery_codes, list):
+        allowed_delivery_codes = list(DEFAULT_ALLOWED_DELIVERY_CODES)
+
     return RuntimeConfig(
         retailcrm_url=str(get_val("retailcrm_url", env.retailcrm_url)).rstrip("/"),
         retailcrm_api_key=str(
@@ -302,6 +314,9 @@ async def load_runtime_config(
         auto_sync_enabled=bool(get_val("auto_sync_enabled")),
         komtet_custom_field_code=str(get_val("komtet_custom_field_code")) or "komtet_id",
         app_timezone=env.app_timezone,
+        allowed_delivery_codes=[
+            str(c).strip() for c in allowed_delivery_codes if str(c).strip()
+        ],
     )
 
 
@@ -348,6 +363,7 @@ async def get_settings_response(
         company_inn=cfg.company_inn,
         trigger_statuses=cfg.trigger_statuses,
         cancel_statuses=cfg.cancel_statuses,
+        allowed_delivery_codes=cfg.allowed_delivery_codes,
         final_status=cfg.final_status,
         default_delivery_time_from=cfg.default_delivery_time_from,
         default_delivery_time_to=cfg.default_delivery_time_to,
@@ -401,6 +417,12 @@ async def update_settings(
                 str(new_val),
                 allow_http=allow_http,
                 field_name=key,
+            )
+        elif key in {"trigger_statuses", "cancel_statuses", "allowed_delivery_codes"} and isinstance(
+            new_val, list
+        ):
+            new_val = list(
+                dict.fromkeys(str(item).strip() for item in new_val if str(item).strip())
             )
 
         serialized = _serialize_setting_value(new_val, value_type)

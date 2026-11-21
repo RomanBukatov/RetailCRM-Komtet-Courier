@@ -27,6 +27,7 @@ export interface SettingsResponse {
   company_inn: string;
   trigger_statuses: string[];
   cancel_statuses: string[];
+  allowed_delivery_codes: string[];
   final_status: string;
   default_delivery_time_from: string;
   default_delivery_time_to: string;
@@ -53,6 +54,7 @@ export interface SettingsUpdateRequest {
   company_inn?: string;
   trigger_statuses?: string[];
   cancel_statuses?: string[];
+  allowed_delivery_codes?: string[];
   final_status?: string;
   default_delivery_time_from?: string;
   default_delivery_time_to?: string;
@@ -118,6 +120,12 @@ export interface CrmSiteDictItem {
   name: string;
 }
 
+export interface CrmDeliveryTypeDictItem {
+  code: string;
+  name: string;
+  active?: boolean;
+}
+
 export interface KomtetEmployeeDictItem {
   id: number | string;
   name: string;
@@ -130,6 +138,7 @@ export interface DictionariesResponse {
   retailcrm_payment_types: CrmPaymentTypeDictItem[];
   retailcrm_couriers: CrmCourierDictItem[];
   retailcrm_sites: CrmSiteDictItem[];
+  retailcrm_delivery_types: CrmDeliveryTypeDictItem[];
   komtet_employees: KomtetEmployeeDictItem[];
   komtet_couriers: KomtetEmployeeDictItem[];
   komtet_queue: Record<string, unknown> | null;

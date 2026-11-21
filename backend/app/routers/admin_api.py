@@ -185,6 +185,7 @@ async def fetch_dictionaries(
     crm_payment_types: list[dict[str, Any]] = []
     crm_couriers: list[dict[str, Any]] = []
     crm_sites: list[dict[str, Any]] = []
+    crm_delivery_types: list[dict[str, Any]] = []
 
     if cfg.retailcrm_url and cfg.retailcrm_api_key:
         try:
@@ -200,6 +201,20 @@ async def fetch_dictionaries(
 
                 sites_resp = await crm.get_sites()
                 crm_sites = _dict_values_list(sites_resp.get("sites"))
+
+                try:
+                    delivery_resp = await crm.get_delivery_types()
+                    crm_delivery_types = [
+                        {
+                            "code": str(dt.get("code") or "").strip(),
+                            "name": str(dt.get("name") or dt.get("code") or "").strip(),
+                            "active": bool(dt.get("active", True)),
+                        }
+                        for dt in _dict_values_list(delivery_resp.get("deliveryTypes"))
+                        if str(dt.get("code") or "").strip()
+                    ]
+                except RetailCRMError as exc:
+                    warnings.append(f"RetailCRM типы доставки: {exc}")
         except (RetailCRMError, ValueError) as exc:
             warnings.append(f"RetailCRM: ошибка загрузки справочников — {exc}")
     else:
@@ -248,6 +263,7 @@ async def fetch_dictionaries(
         retailcrm_payment_types=crm_payment_types,
         retailcrm_couriers=crm_couriers,
         retailcrm_sites=crm_sites,
+        retailcrm_delivery_types=crm_delivery_types,
         komtet_employees=komtet_employees,
         komtet_couriers=komtet_couriers,
         komtet_queue=komtet_queue,
@@ -291,6 +307,7 @@ async def read_logs(
 
     _SKIPPED_EVENTS = (
         "sync_skipped",
+        "delivery_type_not_allowed",
         "anti_loop_skipped",
         "callback_duplicate_skipped",
         "callback_state_update",

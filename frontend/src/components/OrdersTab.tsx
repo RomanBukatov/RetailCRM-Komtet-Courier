@@ -64,6 +64,7 @@ const MANUAL_REASON_LABELS: Record<string, string> = {
   final_status: "заказ уже в финальном статусе",
   status_not_triggered: "статус заказа не входит в список отправки",
   status_not_trigger: "статус заказа не входит в список отправки",
+  delivery_type_not_allowed: "тип доставки не входит в список разрешённых",
   komtet_canceled: "заказ отменён в КОМТЕТ",
   unchanged: "данные заказа не изменились",
   duplicate_callback: "повторное уведомление",
@@ -243,7 +244,7 @@ export const OrdersTab: React.FC<OrdersTabProps> = ({ onUnauthorized }) => {
               onChange={(e) => setIgnoreStatusFilter(e.target.checked)}
               className="h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600"
             />
-            Отправить независимо от текущего статуса заказа
+            Отправить независимо от статуса и типа доставки
           </label>
 
           <button

@@ -67,6 +67,19 @@ def validate_outbound_url(
     return cleaned
 
 
+def get_client_ip(request: Request) -> str:
+    """Extract the client IP from reverse-proxy headers or the socket peer address."""
+    for header_name in ("x-real-ip", "x-forwarded-for"):
+        raw = request.headers.get(header_name, "").strip()
+        if raw:
+            first = raw.split(",")[0].strip()
+            if first:
+                return first
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
 def get_app_settings(request: Request) -> Settings:
     """Return Settings bound to the running app (falls back to cached env settings)."""
     settings = getattr(request.app.state, "settings", None)
@@ -103,6 +116,12 @@ async def require_admin_token(request: Request) -> None:
         return
 
     if not _tokens_match(expected, _extract_bearer(request)):
+        logger.warning(
+            "[Auth] Rejected admin request %s %s from ip=%s",
+            request.method,
+            request.url.path,
+            get_client_ip(request),
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing admin API token",
@@ -134,6 +153,10 @@ async def require_retailcrm_webhook_token(request: Request) -> None:
         or str(request.query_params.get("token") or "").strip()
     )
     if not _tokens_match(expected, provided):
+        logger.warning(
+            "[Auth] Rejected RetailCRM webhook from ip=%s",
+            get_client_ip(request),
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing webhook token",

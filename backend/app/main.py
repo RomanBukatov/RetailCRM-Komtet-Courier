@@ -19,10 +19,36 @@ from app.routers.webhooks import router as webhooks_router
 
 settings = get_settings()
 
-logging.basicConfig(
-    level=getattr(logging, settings.log_level, logging.INFO),
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
+LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
+LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _configure_logging(log_level: str) -> None:
+    """Configure unified compact formatter on root stream handlers and `app.*` loggers."""
+    raw_level = getattr(logging, (log_level or "INFO").upper(), logging.INFO)
+    level = raw_level if isinstance(raw_level, int) else logging.INFO
+    formatter = logging.Formatter(fmt=LOG_FORMAT, datefmt=LOG_DATEFMT)
+
+    root_logger = logging.getLogger()
+    if root_logger.level == logging.NOTSET or root_logger.level > level:
+        root_logger.setLevel(level)
+
+    # Match exact StreamHandler so pytest's LogCaptureHandler (a subclass) is left untouched.
+    stream_handlers = [h for h in root_logger.handlers if type(h) is logging.StreamHandler]
+    if stream_handlers:
+        for handler in stream_handlers:
+            handler.setFormatter(formatter)
+    else:
+        handler = logging.StreamHandler()
+        handler.setFormatter(formatter)
+        root_logger.addHandler(handler)
+
+    logging.getLogger("app").setLevel(level)
+    logging.getLogger("httpx").setLevel(max(level, logging.WARNING))
+    logging.getLogger("httpcore").setLevel(max(level, logging.WARNING))
+
+
+_configure_logging(settings.log_level)
 logger = logging.getLogger(__name__)
 
 _LOG_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
@@ -73,6 +99,7 @@ async def _log_retention_loop(retention_days: int) -> None:
 async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
     """Initialize database schema and seed defaults on startup; dispose engine on shutdown."""
     cfg: Settings = getattr(application.state, "settings", settings)
+    _configure_logging(cfg.log_level)
     _install_access_log_filter()
     logger.info("Starting %s (env=%s)", cfg.app_name, cfg.app_env)
     await init_db(seed=True, env_settings=cfg)
@@ -101,6 +128,7 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
 def create_app(app_settings: Settings | None = None) -> FastAPI:
     """Create and configure the FastAPI application instance."""
     cfg = app_settings or get_settings()
+    _configure_logging(cfg.log_level)
 
     application = FastAPI(
         title=cfg.app_name,

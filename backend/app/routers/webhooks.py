@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs
 
@@ -14,7 +15,7 @@ from app.clients.komtet import KomtetClient
 from app.clients.retailcrm import RetailCRMClient
 from app.config import Settings
 from app.database import get_db
-from app.security import get_app_settings, require_retailcrm_webhook_token
+from app.security import get_app_settings, get_client_ip, require_retailcrm_webhook_token
 from app.services.settings_service import RuntimeConfig, load_runtime_config
 from app.services.sync_service import (
     build_komtet_client,
@@ -101,6 +102,8 @@ async def retailcrm_webhook(
     app_settings: Settings = Depends(get_app_settings),
 ) -> dict[str, Any]:
     """Handle RetailCRM trigger webhook (GET/POST; query, JSON or form-urlencoded)."""
+    started_at = time.perf_counter()
+    client_ip = get_client_ip(request)
     order_id: Optional[int] = None
     trigger_event: Optional[str] = None
     webhook_site: Optional[str] = None
@@ -138,10 +141,29 @@ async def retailcrm_webhook(
                 _merge(flat_form)
 
     if order_id is None:
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        logger.warning(
+            "[Webhook/RetailCRM] incoming method=%s ip=%s order_id=None site=%s event=%s "
+            "-> status=invalid reason=missing_order_id http_status=422 (%.0f ms)",
+            request.method,
+            client_ip,
+            webhook_site or "-",
+            trigger_event or "webhook",
+            elapsed_ms,
+        )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Missing or invalid 'order_id' in RetailCRM webhook request",
         )
+
+    logger.info(
+        "[Webhook/RetailCRM] incoming method=%s ip=%s order_id=%s site=%s event=%s",
+        request.method,
+        client_ip,
+        order_id,
+        webhook_site or "-",
+        trigger_event or "webhook",
+    )
 
     cfg = await load_runtime_config(db, env_settings=app_settings)
     try:
@@ -155,16 +177,39 @@ async def retailcrm_webhook(
                 komtet_client=komtet,
             )
     except ValueError as exc:
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        logger.error(
+            "[Webhook/RetailCRM] done order_id=%s status=error reason=credentials_not_configured "
+            "http_status=503 (%.0f ms)",
+            order_id,
+            elapsed_ms,
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Integration credentials are not configured: {exc}",
         ) from exc
 
+    elapsed_ms = (time.perf_counter() - started_at) * 1000.0
     if result.get("status") == "error" and result.get("transient_error") is True:
+        logger.warning(
+            "[Webhook/RetailCRM] done order_id=%s status=%s reason=%s http_status=503 (%.0f ms)",
+            order_id,
+            result.get("status"),
+            result.get("reason") or "transient_error",
+            elapsed_ms,
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=result.get("error") or "Transient synchronization error",
         )
+
+    logger.info(
+        "[Webhook/RetailCRM] done order_id=%s status=%s reason=%s http_status=200 (%.0f ms)",
+        order_id,
+        result.get("status"),
+        result.get("reason") or "-",
+        elapsed_ms,
+    )
     return {"ok": True, "result": result}
 
 
@@ -219,12 +264,15 @@ async def komtet_webhook(
     app_settings: Settings = Depends(get_app_settings),
 ) -> dict[str, Any]:
     """Handle incoming KOMTET Kassa order callback with X-HMAC-Signature verification."""
+    started_at = time.perf_counter()
+    client_ip = get_client_ip(request)
     raw_body = await request.body()
     signature = request.headers.get("X-HMAC-Signature", "")
     candidate_urls = _build_candidate_urls(request)
     query_string = request.url.query
 
     cfg = await load_runtime_config(db, env_settings=app_settings)
+    hmac_checked = bool(cfg.verify_komtet_signature or app_settings.is_production)
 
     # Verify HMAC signature against raw_body BEFORE parsing JSON or creating downstream clients.
     try:
@@ -240,24 +288,60 @@ async def komtet_webhook(
             require_signature=app_settings.is_production,
         )
     except PermissionError as exc:
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        logger.warning(
+            "[Webhook/KOMTET] ip=%s hmac=invalid komtet_id=- state=- -> status=rejected "
+            "http_status=401 (%.0f ms)",
+            client_ip,
+            elapsed_ms,
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(exc),
         ) from exc
 
+    hmac_status = "valid" if hmac_checked else "skipped"
+
     try:
         payload = json.loads(raw_body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        logger.warning(
+            "[Webhook/KOMTET] ip=%s hmac=%s komtet_id=- state=- -> status=invalid_json "
+            "http_status=400 (%.0f ms)",
+            client_ip,
+            hmac_status,
+            elapsed_ms,
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid JSON payload",
         ) from exc
 
     if not isinstance(payload, dict):
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        logger.warning(
+            "[Webhook/KOMTET] ip=%s hmac=%s komtet_id=- state=- -> status=invalid_json "
+            "http_status=400 (%.0f ms)",
+            client_ip,
+            hmac_status,
+            elapsed_ms,
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Callback payload must be a JSON object",
         )
+
+    cb_komtet_id = payload.get("id")
+    cb_komtet_id_log = cb_komtet_id if cb_komtet_id is not None else "-"
+    cb_state = str(payload.get("state") or "").strip().lower() or "-"
+    logger.info(
+        "[Webhook/KOMTET] incoming ip=%s hmac=%s komtet_id=%s state=%s",
+        client_ip,
+        hmac_status,
+        cb_komtet_id_log,
+        cb_state,
+    )
 
     try:
         async with crm_factory(cfg) as crm:
@@ -274,14 +358,48 @@ async def komtet_webhook(
                 signature_already_verified=True,
             )
     except ValueError as exc:
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        logger.error(
+            "[Webhook/KOMTET] done ip=%s hmac=%s komtet_id=%s state=%s status=error "
+            "reason=credentials_not_configured http_status=503 (%.0f ms)",
+            client_ip,
+            hmac_status,
+            cb_komtet_id_log,
+            cb_state,
+            elapsed_ms,
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Integration credentials are not configured: {exc}",
         ) from exc
 
+    elapsed_ms = (time.perf_counter() - started_at) * 1000.0
     if result.get("status") == "error" and result.get("transient_error") is True:
+        logger.warning(
+            "[Webhook/KOMTET] done ip=%s hmac=%s komtet_id=%s state=%s status=%s reason=%s "
+            "http_status=503 (%.0f ms)",
+            client_ip,
+            hmac_status,
+            cb_komtet_id_log,
+            cb_state,
+            result.get("status"),
+            result.get("reason") or "transient_error",
+            elapsed_ms,
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=result.get("error") or "Transient synchronization error",
         )
+
+    logger.info(
+        "[Webhook/KOMTET] done ip=%s hmac=%s komtet_id=%s state=%s status=%s reason=%s "
+        "http_status=200 (%.0f ms)",
+        client_ip,
+        hmac_status,
+        cb_komtet_id_log,
+        cb_state,
+        result.get("status"),
+        result.get("reason") or "-",
+        elapsed_ms,
+    )
     return {"ok": True, "result": result}

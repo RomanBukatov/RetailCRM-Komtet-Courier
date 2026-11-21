@@ -2070,3 +2070,239 @@ async def test_komtet_webhook_verifies_hmac_before_json_parsing_and_health_log_f
     assert flt.filter(rec_health_200) is False
     assert flt.filter(rec_api_200) is True
     assert flt.filter(rec_health_500) is True
+
+
+@pytest.mark.asyncio
+async def test_admin_audit_logs_settings_and_mappings_redact_secrets(tmp_path: Path) -> None:
+    """Verify PUT /settings and PUT /mappings write system audit logs without leaking secrets."""
+    db_url = f"sqlite+aiosqlite:///{(tmp_path / 'audit.db').as_posix()}"
+    engine = create_engine(db_url)
+    test_settings = _test_env_settings()
+    await init_db(engine, seed=True, env_settings=test_settings)
+    session_maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    app = create_app(test_settings)
+
+    async def override_get_db():
+        async with session_maker() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        # 1) Update non-secret and secret settings -> secrets must be stored as "[UPDATED]" only
+        r_set = await client.put(
+            "/api/v1/settings",
+            headers={"X-Forwarded-For": "203.0.113.10, 10.0.0.1"},
+            json={
+                "auto_sync_enabled": False,
+                "default_vat": "10",
+                "trigger_statuses": ["new", "paid"],
+                "allowed_delivery_codes": ["courier"],
+                "retailcrm_api_key": "super-secret-crm-value-7777",
+                "komtet_secret_key": "super-secret-komtet-value-6666",
+            },
+        )
+        assert r_set.status_code == 200
+
+        async with session_maker() as db:
+            row = await db.scalar(
+                select(SyncLog)
+                .where(SyncLog.event_type == "settings_updated")
+                .order_by(SyncLog.id.desc())
+            )
+            assert row is not None
+            assert row.direction == "system"
+            assert row.level == "INFO"
+            assert row.message == "Обновлены настройки через панель управления"
+            assert row.payload is not None
+            assert row.payload["client_ip"] == "203.0.113.10"
+            assert set(row.payload["changed_fields"]) == {
+                "auto_sync_enabled",
+                "default_vat",
+                "trigger_statuses",
+                "allowed_delivery_codes",
+                "retailcrm_api_key",
+                "komtet_secret_key",
+            }
+            assert row.payload["values"] == {
+                "auto_sync_enabled": False,
+                "default_vat": "10",
+                "trigger_statuses": ["new", "paid"],
+                "allowed_delivery_codes": ["courier"],
+                "retailcrm_api_key": "[UPDATED]",
+                "komtet_secret_key": "[UPDATED]",
+            }
+            dumped = json.dumps(row.payload, ensure_ascii=False)
+            assert "super-secret-crm-value" not in dumped
+            assert "super-secret-komtet-value" not in dumped
+            assert "7777" not in dumped
+            assert "6666" not in dumped
+            assert "7777" not in row.message
+            assert "6666" not in row.message
+
+        # 2) Sending masked secret placeholder must NOT log secret key as changed
+        r_set_masked = await client.put(
+            "/api/v1/settings",
+            headers={"X-Real-IP": "203.0.113.11"},
+            json={
+                "retailcrm_api_key": "****7777",
+                "final_status": "delivered",
+            },
+        )
+        assert r_set_masked.status_code == 200
+
+        async with session_maker() as db:
+            row2 = await db.scalar(
+                select(SyncLog)
+                .where(SyncLog.event_type == "settings_updated")
+                .order_by(SyncLog.id.desc())
+            )
+            assert row2 is not None
+            assert row2.payload is not None
+            assert row2.payload["client_ip"] == "203.0.113.11"
+            assert row2.payload["changed_fields"] == ["final_status"]
+            assert row2.payload["values"] == {"final_status": "delivered"}
+            assert "retailcrm_api_key" not in row2.payload["values"]
+
+        # 3) Update mappings -> system audit log recorded with replace_types, count, client_ip
+        r_map = await client.put(
+            "/api/v1/mappings",
+            headers={"X-Real-IP": "198.51.100.5"},
+            json={
+                "items": [
+                    {
+                        "mapping_type": "courier",
+                        "retailcrm_code": "1",
+                        "retailcrm_name": "Иван",
+                        "komtet_code": "701",
+                        "komtet_name": "Курьер Иван",
+                        "is_active": True,
+                    },
+                    {
+                        "mapping_type": "courier",
+                        "retailcrm_code": "2",
+                        "retailcrm_name": "Петр",
+                        "komtet_code": "702",
+                        "komtet_name": "Курьер Петр",
+                        "is_active": True,
+                    },
+                ],
+                "replace_types": ["courier"],
+            },
+        )
+        assert r_map.status_code == 200
+
+        async with session_maker() as db:
+            map_log = await db.scalar(
+                select(SyncLog)
+                .where(SyncLog.event_type == "mappings_updated")
+                .order_by(SyncLog.id.desc())
+            )
+            assert map_log is not None
+            assert map_log.direction == "system"
+            assert map_log.level == "INFO"
+            assert map_log.message == "Обновлены соответствия через панель управления"
+            assert map_log.payload == {
+                "replace_types": ["courier"],
+                "count": 2,
+                "client_ip": "198.51.100.5",
+            }
+
+        # 4) GET /api/v1/logs?direction=system returns all 3 audit entries
+        r_sys_logs = await client.get("/api/v1/logs?direction=system")
+        assert r_sys_logs.status_code == 200
+        sys_data = r_sys_logs.json()
+        assert sys_data["total"] == 3
+        assert len(sys_data["items"]) == 3
+        assert all(item["direction"] == "system" for item in sys_data["items"])
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_http_clients_structured_logging_and_no_secret_leak(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify RetailCRMClient & KomtetClient emit timed logs with retries/errors and never leak secrets."""
+    import logging
+
+    crm_attempts = {"order": 0}
+    komtet_attempts = {"create": 0}
+
+    def crm_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/credentials":
+            return httpx.Response(200, json={"success": True, "sitesAvailable": ["main"]})
+        if request.url.path == "/api/v5/orders/101" and request.method == "GET":
+            crm_attempts["order"] += 1
+            if crm_attempts["order"] == 1:
+                return httpx.Response(429, json={"success": False, "errorMsg": "Rate limit"})
+            return httpx.Response(200, json={"success": True, "order": {"id": 101}})
+        if request.url.path == "/api/v5/orders/101/edit" and request.method == "POST":
+            return httpx.Response(
+                422,
+                json={
+                    "success": False,
+                    "errorMsg": "Validation failed",
+                    "errors": {"phone": "bad"},
+                },
+            )
+        return httpx.Response(404, json={"success": False})
+
+    def komtet_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/shop/v2/queues/1":
+            return httpx.Response(200, json={"id": 1, "state": "active"})
+        if request.url.path == "/api/shop/v2/orders" and request.method == "POST":
+            komtet_attempts["create"] += 1
+            if komtet_attempts["create"] == 1:
+                return httpx.Response(503, text="Upstream busy")
+            return httpx.Response(200, json={"id": 500, "state": "new"})
+        if request.url.path == "/api/shop/v2/orders/99" and request.method == "PUT":
+            return httpx.Response(
+                422,
+                json={"title": "Bad order", "code": "ERR422", "description": "Invalid total"},
+            )
+        return httpx.Response(404)
+
+    with caplog.at_level(logging.INFO, logger="app"):
+        async with (
+            httpx.AsyncClient(transport=httpx.MockTransport(crm_handler)) as crm_http,
+            httpx.AsyncClient(transport=httpx.MockTransport(komtet_handler)) as komtet_http,
+        ):
+            crm = RetailCRMClient(
+                "https://example.retailcrm.ru",
+                "crm-ultra-secret-token",
+                retry_delays=(0.0,),
+                client=crm_http,
+            )
+            komtet = KomtetClient(
+                "shop-1",
+                "komtet-ultra-secret-key",
+                retry_delays=(0.0,),
+                client=komtet_http,
+            )
+
+            await crm.check_credentials()
+            await crm.get_order(101, site="main")
+            with pytest.raises(RetailCRMError):
+                await crm.edit_order(101, {"status": "complete"})
+
+            await komtet.get_queue(1)
+            await komtet.create_order({"external_id": "101"})
+            with pytest.raises(KomtetError):
+                await komtet.update_order(99, {"external_id": "101"})
+
+    log_text = caplog.text
+    assert "crm-ultra-secret-token" not in log_text
+    assert "komtet-ultra-secret-key" not in log_text
+    assert "[RetailCRM] GET /api/credentials -> 200 (" in log_text
+    assert "[RetailCRM] retry 1/1 after GET /api/v5/orders/101 -> 429 (delay=0.0s)" in log_text
+    assert "[RetailCRM] GET /api/v5/orders/101 -> 200 (" in log_text
+    assert "[RetailCRM] POST /api/v5/orders/101/edit -> 422 (" in log_text
+    assert "[KOMTET] GET /api/shop/v2/queues/1 -> 200 (" in log_text
+    assert "[KOMTET] retry 1/1 after POST /api/shop/v2/orders -> 503 (delay=0.0s)" in log_text
+    assert "[KOMTET] POST /api/shop/v2/orders -> 200 (" in log_text
+    assert "[KOMTET] PUT /api/shop/v2/orders/99 -> 422 (" in log_text
+    assert "ms)" in log_text

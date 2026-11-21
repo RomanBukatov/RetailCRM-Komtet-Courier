@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any, Callable, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,8 +28,9 @@ from app.schemas import (
     SyncLogItemSchema,
     SyncLogsResponse,
 )
-from app.security import get_app_settings, require_admin_token
+from app.security import get_app_settings, get_client_ip, require_admin_token
 from app.services.settings_service import (
+    SETTING_DEFINITIONS,
     RuntimeConfig,
     get_settings_response,
     list_mappings,
@@ -40,6 +43,9 @@ from app.services.sync_service import (
     build_retailcrm_client,
     sync_retailcrm_to_komtet,
 )
+
+logger = logging.getLogger(__name__)
+_SECRET_SETTING_KEYS = frozenset({"retailcrm_api_key", "komtet_secret_key"})
 
 router = APIRouter(
     prefix="/api/v1",
@@ -69,27 +75,85 @@ async def read_settings(
 
 @router.put("/settings", response_model=SettingsResponse)
 async def save_settings(
+    request: Request,
     payload: SettingsUpdateRequest,
     db: AsyncSession = Depends(get_db),
     app_settings: Settings = Depends(get_app_settings),
 ) -> SettingsResponse:
-    """Update service settings in SQLite."""
+    """Update service settings in SQLite and record a redacted audit log entry."""
+    client_ip = get_client_ip(request)
+    before_cfg = await load_runtime_config(db, env_settings=app_settings)
     try:
-        return await update_settings(db, payload, env_settings=app_settings)
+        response = await update_settings(db, payload, env_settings=app_settings)
     except ValueError as exc:
+        logger.warning(
+            "[Admin] PUT /api/v1/settings rejected ip=%s: %s",
+            client_ip,
+            exc,
+        )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from exc
 
+    after_cfg = await load_runtime_config(db, env_settings=app_settings)
+    submitted = payload.model_dump(exclude_unset=True)
+    changed_fields: list[str] = []
+    changed_values: dict[str, Any] = {}
+
+    for key, raw_val in submitted.items():
+        if key not in SETTING_DEFINITIONS:
+            continue
+        is_secret = key in _SECRET_SETTING_KEYS or SETTING_DEFINITIONS[key][1]
+        if is_secret:
+            if raw_val is None:
+                continue
+            str_val = str(raw_val).strip()
+            if not str_val or str_val.startswith("****"):
+                continue
+            changed_fields.append(key)
+            changed_values[key] = "[UPDATED]"
+        else:
+            before_val = getattr(before_cfg, key)
+            after_val = getattr(after_cfg, key)
+            if before_val != after_val:
+                changed_fields.append(key)
+                changed_values[key] = after_val
+
+    db.add(
+        SyncLog(
+            direction="system",
+            level="INFO",
+            event_type="settings_updated",
+            message="Обновлены настройки через панель управления",
+            payload={
+                "changed_fields": changed_fields,
+                "values": changed_values,
+                "client_ip": client_ip,
+            },
+        )
+    )
+    await db.commit()
+    logger.info(
+        "[Admin] PUT /api/v1/settings ip=%s changed_fields=%s",
+        client_ip,
+        changed_fields,
+    )
+    return response
+
 
 @router.post("/settings/test-connection", response_model=ConnectionCheckResult)
 async def test_connection_and_init_field(
+    request: Request,
     db: AsyncSession = Depends(get_db),
     crm_factory: Callable[[RuntimeConfig], RetailCRMClient] = Depends(get_retailcrm_factory),
     komtet_factory: Callable[[RuntimeConfig], KomtetClient] = Depends(get_komtet_factory),
 ) -> ConnectionCheckResult:
     """Check RetailCRM & KOMTET credentials and ensure `komtet_id` custom field exists."""
+    started_at = time.perf_counter()
+    client_ip = get_client_ip(request)
+    logger.info("[Admin] POST /api/v1/settings/test-connection started ip=%s", client_ip)
+
     cfg = await load_runtime_config(db)
     warnings: list[str] = []
 
@@ -149,6 +213,18 @@ async def test_connection_and_init_field(
         except (KomtetError, ValueError) as exc:
             komtet_message = str(exc)
 
+    elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+    logger.info(
+        "[Admin] POST /api/v1/settings/test-connection done ip=%s retailcrm_ok=%s komtet_ok=%s "
+        "queue_active=%s delivery_active=%s warnings=%d (%.0f ms)",
+        client_ip,
+        retailcrm_ok,
+        komtet_ok,
+        queue_active,
+        delivery_service_active,
+        len(warnings),
+        elapsed_ms,
+    )
     return ConnectionCheckResult(
         retailcrm_ok=retailcrm_ok,
         retailcrm_message=retailcrm_message,
@@ -283,11 +359,33 @@ async def read_mappings(
 
 @router.put("/mappings", response_model=MappingsResponse)
 async def save_mappings(
+    request: Request,
     payload: MappingsUpdateRequest,
     db: AsyncSession = Depends(get_db),
 ) -> MappingsResponse:
-    """Bulk upsert or replace mappings by type."""
+    """Bulk upsert or replace mappings by type and record an audit log entry."""
+    client_ip = get_client_ip(request)
     rows = await upsert_mappings(db, payload.items, replace_types=payload.replace_types)
+    db.add(
+        SyncLog(
+            direction="system",
+            level="INFO",
+            event_type="mappings_updated",
+            message="Обновлены соответствия через панель управления",
+            payload={
+                "replace_types": list(payload.replace_types),
+                "count": len(payload.items),
+                "client_ip": client_ip,
+            },
+        )
+    )
+    await db.commit()
+    logger.info(
+        "[Admin] PUT /api/v1/mappings ip=%s replace_types=%s count=%d",
+        client_ip,
+        list(payload.replace_types),
+        len(payload.items),
+    )
     return MappingsResponse(items=[MappingItemSchema.model_validate(row) for row in rows])
 
 
@@ -390,6 +488,7 @@ async def read_orders_sync(
 
 @router.post("/sync/manual/{order_id}")
 async def manual_sync_order(
+    request: Request,
     order_id: int,
     ignore_status_filter: bool = Query(default=False),
     db: AsyncSession = Depends(get_db),
@@ -402,6 +501,15 @@ async def manual_sync_order(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="order_id must be a positive integer",
         )
+
+    started_at = time.perf_counter()
+    client_ip = get_client_ip(request)
+    logger.info(
+        "[Admin] POST /api/v1/sync/manual/%d started ip=%s ignore_status_filter=%s",
+        order_id,
+        client_ip,
+        ignore_status_filter,
+    )
 
     cfg = await load_runtime_config(db)
     try:
@@ -416,8 +524,28 @@ async def manual_sync_order(
                 komtet_client=komtet,
             )
     except ValueError as exc:
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        logger.warning(
+            "[Admin] POST /api/v1/sync/manual/%d failed ip=%s reason=credentials_not_configured "
+            "(%.0f ms): %s",
+            order_id,
+            client_ip,
+            elapsed_ms,
+            exc,
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Integration credentials are not configured: {exc}",
         ) from exc
+
+    elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+    logger.info(
+        "[Admin] POST /api/v1/sync/manual/%d done ip=%s status=%s komtet_id=%s reason=%s (%.0f ms)",
+        order_id,
+        client_ip,
+        result.get("status"),
+        result.get("komtet_order_id") or "-",
+        result.get("reason") or "-",
+        elapsed_ms,
+    )
     return {"ok": result.get("status") != "error", "result": result}

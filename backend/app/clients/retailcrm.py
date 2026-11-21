@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Literal, Optional
 from urllib.parse import quote
 
@@ -15,6 +16,11 @@ logger = logging.getLogger(__name__)
 TRANSIENT_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
 RETRYABLE_HTTP_STATUSES = frozenset({429, 502, 503, 504})
 DEFAULT_RETRY_DELAYS: tuple[float, ...] = (0.3, 0.7, 1.5)
+
+
+def _truncate_error(text: str, limit: int = 500) -> str:
+    """Collapse whitespace and truncate error details for safe logging."""
+    return " ".join((text or "").split())[:limit]
 
 
 class RetailCRMError(Exception):
@@ -129,6 +135,11 @@ class RetailCRMClient:
         params: Optional[dict[str, Any]] = None,
         form_data: Optional[dict[str, str]] = None,
     ) -> dict[str, Any]:
+        upper_method = method.upper()
+        clean_path = "/" + path.lstrip("/")
+        safe_path = (
+            f"/api/{self.API_VERSION}{clean_path}" if versioned else f"/api{clean_path}"
+        ).split("?", 1)[0]
         url = self._build_url(path, versioned=versioned)
         headers = {
             "X-API-KEY": self._api_key,
@@ -137,51 +148,70 @@ class RetailCRMClient:
         query_params = _flatten_query_params(params) if params else None
 
         response: Optional[httpx.Response] = None
-        max_attempts = len(self._retry_delays) + 1
+        total_retries = len(self._retry_delays)
+        max_attempts = total_retries + 1
+        started_at = time.perf_counter()
+
         for attempt in range(max_attempts):
             try:
                 response = await self._client.request(
-                    method=method.upper(),
+                    method=upper_method,
                     url=url,
                     headers=headers,
                     params=query_params,
                     data=form_data,
                 )
             except httpx.TransportError as exc:
-                if attempt < len(self._retry_delays):
+                if attempt < total_retries:
                     delay = self._retry_delays[attempt]
                     logger.warning(
-                        "RetailCRM transport error on %s %s (attempt %d/%d), retrying in %.1fs: %s",
-                        method,
-                        url,
+                        "[RetailCRM] retry %d/%d after %s %s -> %s (delay=%.1fs)",
                         attempt + 1,
-                        max_attempts,
+                        total_retries,
+                        upper_method,
+                        safe_path,
+                        type(exc).__name__,
                         delay,
-                        exc,
                     )
                     await asyncio.sleep(delay)
                     continue
-                logger.exception("RetailCRM HTTP transport error on %s %s", method, url)
+                elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+                logger.error(
+                    "[RetailCRM] %s %s -> %s (%.0f ms): %s",
+                    upper_method,
+                    safe_path,
+                    type(exc).__name__,
+                    elapsed_ms,
+                    _truncate_error(str(exc)),
+                )
                 raise RetailCRMError(
                     f"RetailCRM transport error: {exc}",
                     is_transient=True,
                 ) from exc
             except httpx.HTTPError as exc:
-                logger.exception("RetailCRM HTTP error on %s %s", method, url)
+                elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+                logger.error(
+                    "[RetailCRM] %s %s -> %s (%.0f ms): %s",
+                    upper_method,
+                    safe_path,
+                    type(exc).__name__,
+                    elapsed_ms,
+                    _truncate_error(str(exc)),
+                )
                 raise RetailCRMError(
                     f"RetailCRM HTTP error: {exc}",
                     is_transient=True,
                 ) from exc
 
-            if response.status_code in RETRYABLE_HTTP_STATUSES and attempt < len(self._retry_delays):
+            if response.status_code in RETRYABLE_HTTP_STATUSES and attempt < total_retries:
                 delay = self._retry_delays[attempt]
                 logger.warning(
-                    "RetailCRM returned HTTP %d on %s %s (attempt %d/%d), retrying in %.1fs",
-                    response.status_code,
-                    method,
-                    url,
+                    "[RetailCRM] retry %d/%d after %s %s -> %s (delay=%.1fs)",
                     attempt + 1,
-                    max_attempts,
+                    total_retries,
+                    upper_method,
+                    safe_path,
+                    response.status_code,
                     delay,
                 )
                 await asyncio.sleep(delay)
@@ -189,16 +219,33 @@ class RetailCRMClient:
             break
 
         assert response is not None
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
 
         try:
             payload = response.json()
         except ValueError as exc:
+            logger.error(
+                "[RetailCRM] %s %s -> %s (%.0f ms): %s",
+                upper_method,
+                safe_path,
+                response.status_code,
+                elapsed_ms,
+                _truncate_error(f"non-JSON response: {response.text}"),
+            )
             raise RetailCRMError(
                 f"RetailCRM returned non-JSON response: {response.text[:500]}",
                 status_code=response.status_code,
             ) from exc
 
         if not isinstance(payload, dict):
+            logger.error(
+                "[RetailCRM] %s %s -> %s (%.0f ms): %s",
+                upper_method,
+                safe_path,
+                response.status_code,
+                elapsed_ms,
+                f"unexpected JSON payload type: {type(payload).__name__}",
+            )
             raise RetailCRMError(
                 "RetailCRM returned unexpected JSON payload type",
                 status_code=response.status_code,
@@ -206,6 +253,20 @@ class RetailCRMClient:
 
         if response.status_code >= 400 or payload.get("success") is False:
             error_msg = payload.get("errorMsg") or f"RetailCRM API error on {method} {path}"
+            err_parts: list[str] = []
+            if payload.get("errorMsg"):
+                err_parts.append(str(payload["errorMsg"]))
+            if payload.get("errors"):
+                err_parts.append(f"errors={json.dumps(payload['errors'], ensure_ascii=False)}")
+            raw_err_body = "; ".join(err_parts) if err_parts else response.text
+            logger.error(
+                "[RetailCRM] %s %s -> %s (%.0f ms): %s",
+                upper_method,
+                safe_path,
+                response.status_code,
+                elapsed_ms,
+                _truncate_error(raw_err_body),
+            )
             raise RetailCRMError(
                 error_msg,
                 status_code=response.status_code,
@@ -213,6 +274,13 @@ class RetailCRMClient:
                 response_data=payload,
             )
 
+        logger.info(
+            "[RetailCRM] %s %s -> %s (%.0f ms)",
+            upper_method,
+            safe_path,
+            response.status_code,
+            elapsed_ms,
+        )
         return payload
 
     # ------------------------------------------------------------------

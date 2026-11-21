@@ -644,7 +644,12 @@ async def _write_back_komtet_id(
             f"KOMTET order #{komtet_id} is linked locally, but saving "
             f"customFields.{cfg.komtet_custom_field_code} to RetailCRM failed: {exc}"
         )
-        logger.warning(message)
+        logger.warning(
+            "[RCRM->KOMTET] order=%s komtet_id=%s writeback_failed: %s",
+            order_id,
+            komtet_id,
+            exc,
+        )
         order_sync.last_error = message
         await _add_sync_log(
             session,
@@ -675,6 +680,12 @@ async def _sync_retailcrm_to_komtet_locked(
     mappings = await load_active_mappings(session)
 
     if not cfg.auto_sync_enabled and not force:
+        logger.info(
+            "[RCRM->KOMTET] order=%s site=%s status=- delivery=- -> action=skipped "
+            "komtet_id=- reason=auto_sync_disabled",
+            order_id,
+            site or cfg.retailcrm_default_site or "-",
+        )
         await _add_sync_log(
             session,
             direction="crm_to_komtet",
@@ -699,6 +710,14 @@ async def _sync_retailcrm_to_komtet_locked(
         if last_cb is not None:
             elapsed = (now - last_cb).total_seconds()
             if elapsed < cfg.anti_loop_seconds:
+                logger.info(
+                    "[RCRM->KOMTET] order=%s site=%s status=- delivery=- -> action=skipped "
+                    "komtet_id=%s reason=anti_loop(%.1fs)",
+                    order_id,
+                    order_sync.retailcrm_site or site or "-",
+                    order_sync.komtet_order_id or "-",
+                    elapsed,
+                )
                 await _add_sync_log(
                     session,
                     direction="crm_to_komtet",
@@ -743,12 +762,17 @@ async def _sync_retailcrm_to_komtet_locked(
             raise RetailCRMError(f"RetailCRM order {order_id} payload is empty")
 
         status = str(order.get("status") or "").strip()
+        delivery_obj = order.get("delivery") if isinstance(order.get("delivery"), dict) else {}
+        delivery_code = str(delivery_obj.get("code") or "").strip()
         resolved_site = (
             order.get("site")
             or (order_sync.retailcrm_site if order_sync is not None else None)
             or (site.strip() if site else None)
             or (cfg.retailcrm_default_site or None)
         )
+        site_log = resolved_site or "-"
+        status_log = status or "-"
+        delivery_log = delivery_code or "-"
         order_number = str(order.get("number") or "")
         crm_komtet_id = _extract_komtet_id_from_order(order, cfg.komtet_custom_field_code)
 
@@ -768,6 +792,15 @@ async def _sync_retailcrm_to_komtet_locked(
         # Guard: an order already fiscalized (`komtet_state == "done"`) must NEVER be
         # deleted or overwritten in KOMTET, even if its CRM status is later moved to cancel.
         if not force and order_sync.komtet_state == "done":
+            logger.info(
+                "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=skipped "
+                "komtet_id=%s reason=already_done",
+                order_id,
+                site_log,
+                status_log,
+                delivery_log,
+                order_sync.komtet_order_id or "-",
+            )
             await _add_sync_log(
                 session,
                 direction="crm_to_komtet",
@@ -805,6 +838,15 @@ async def _sync_retailcrm_to_komtet_locked(
                 order_sync.komtet_state = "done"
                 order_sync.sync_status = "completed"
                 order_sync.last_error = None
+                logger.info(
+                    "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=skipped "
+                    "komtet_id=%s reason=already_done",
+                    order_id,
+                    site_log,
+                    status_log,
+                    delivery_log,
+                    komtet_id,
+                )
                 await _add_sync_log(
                     session,
                     direction="crm_to_komtet",
@@ -838,6 +880,15 @@ async def _sync_retailcrm_to_komtet_locked(
                 order_sync.last_hash = None
                 order_sync.last_synced_at = now
                 order_sync.last_error = None
+                logger.info(
+                    "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=canceled "
+                    "komtet_id=%s reason=cancel_status",
+                    order_id,
+                    site_log,
+                    status_log,
+                    delivery_log,
+                    komtet_id,
+                )
                 await _add_sync_log(
                     session,
                     direction="crm_to_komtet",
@@ -855,6 +906,15 @@ async def _sync_retailcrm_to_komtet_locked(
                     "komtet_order_id": komtet_id,
                 }
 
+            logger.info(
+                "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=skipped "
+                "komtet_id=%s reason=canceled_no_action",
+                order_id,
+                site_log,
+                status_log,
+                delivery_log,
+                order_sync.komtet_order_id or "-",
+            )
             await _add_sync_log(
                 session,
                 direction="crm_to_komtet",
@@ -880,6 +940,15 @@ async def _sync_retailcrm_to_komtet_locked(
             status == cfg.final_status
             or (order_sync.sync_status == "completed" and order_sync.komtet_state == "done")
         ):
+            logger.info(
+                "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=skipped "
+                "komtet_id=%s reason=final_status",
+                order_id,
+                site_log,
+                status_log,
+                delivery_log,
+                komtet_id or "-",
+            )
             await _add_sync_log(
                 session,
                 direction="crm_to_komtet",
@@ -899,6 +968,15 @@ async def _sync_retailcrm_to_komtet_locked(
 
         # Check trigger status allowlist
         if not ignore_status_filter and cfg.trigger_statuses and status not in cfg.trigger_statuses:
+            logger.info(
+                "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=skipped "
+                "komtet_id=%s reason=status_not_triggered",
+                order_id,
+                site_log,
+                status_log,
+                delivery_log,
+                komtet_id or "-",
+            )
             await _add_sync_log(
                 session,
                 direction="crm_to_komtet",
@@ -919,11 +997,18 @@ async def _sync_retailcrm_to_komtet_locked(
 
         # Check allowed delivery types allowlist (empty list = allow all delivery types)
         if not ignore_status_filter and cfg.allowed_delivery_codes:
-            delivery_obj = order.get("delivery") if isinstance(order.get("delivery"), dict) else {}
-            delivery_code = str(delivery_obj.get("code") or "").strip()
             if delivery_code not in cfg.allowed_delivery_codes:
                 if order_sync in session.new:
                     session.expunge(order_sync)
+                logger.info(
+                    "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=skipped "
+                    "komtet_id=%s reason=delivery_type_not_allowed",
+                    order_id,
+                    site_log,
+                    status_log,
+                    delivery_log,
+                    komtet_id or "-",
+                )
                 await _add_sync_log(
                     session,
                     direction="crm_to_komtet",
@@ -957,6 +1042,15 @@ async def _sync_retailcrm_to_komtet_locked(
             and order_sync.sync_status == "canceled"
             and order_sync.komtet_state != _STATE_DELETED_BY_SYNC
         ):
+            logger.warning(
+                "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=skipped "
+                "komtet_id=%s reason=komtet_canceled",
+                order_id,
+                site_log,
+                status_log,
+                delivery_log,
+                order_sync.komtet_order_id,
+            )
             await _add_sync_log(
                 session,
                 direction="crm_to_komtet",
@@ -991,6 +1085,17 @@ async def _sync_retailcrm_to_komtet_locked(
             komtet=komtet,
         )
         if link_note:
+            link_log_fn = logger.warning if komtet_id is None else logger.info
+            link_log_fn(
+                "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=link_resolved "
+                "komtet_id=%s reason=%s",
+                order_id,
+                site_log,
+                status_log,
+                delivery_log,
+                komtet_id or crm_komtet_id or "-",
+                link_note,
+            )
             await _add_sync_log(
                 session,
                 direction="crm_to_komtet",
@@ -1012,6 +1117,15 @@ async def _sync_retailcrm_to_komtet_locked(
             order_sync.komtet_state = "done"
             order_sync.sync_status = "completed"
             order_sync.last_error = None
+            logger.info(
+                "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=skipped "
+                "komtet_id=%s reason=already_done",
+                order_id,
+                site_log,
+                status_log,
+                delivery_log,
+                komtet_id,
+            )
             await _add_sync_log(
                 session,
                 direction="crm_to_komtet",
@@ -1037,6 +1151,15 @@ async def _sync_retailcrm_to_komtet_locked(
             order_sync.komtet_order_id = komtet_id
             order_sync.komtet_state = "canceled"
             order_sync.sync_status = "canceled"
+            logger.warning(
+                "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=skipped "
+                "komtet_id=%s reason=komtet_canceled",
+                order_id,
+                site_log,
+                status_log,
+                delivery_log,
+                komtet_id,
+            )
             await _add_sync_log(
                 session,
                 direction="crm_to_komtet",
@@ -1080,6 +1203,16 @@ async def _sync_retailcrm_to_komtet_locked(
             order_sync.last_hash = payload_hash
             order_sync.last_synced_at = now
             order_sync.last_error = None
+            logger.info(
+                "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=created "
+                "komtet_id=%s reason=%s",
+                order_id,
+                site_log,
+                status_log,
+                delivery_log,
+                new_komtet_id,
+                reason,
+            )
             await _add_sync_log(
                 session,
                 direction="crm_to_komtet",
@@ -1121,6 +1254,15 @@ async def _sync_retailcrm_to_komtet_locked(
                     session, crm=crm, cfg=cfg, order_id=order_id, site=resolved_site,
                     komtet_id=komtet_id, order_sync=order_sync,
                 )
+            logger.info(
+                "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=skipped "
+                "komtet_id=%s reason=unchanged",
+                order_id,
+                site_log,
+                status_log,
+                delivery_log,
+                komtet_id,
+            )
             await _add_sync_log(
                 session,
                 direction="crm_to_komtet",
@@ -1149,6 +1291,15 @@ async def _sync_retailcrm_to_komtet_locked(
         except KomtetError as exc:
             if exc.status_code != 404:
                 raise
+            logger.warning(
+                "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=recreate "
+                "komtet_id=%s reason=komtet_order_missing",
+                order_id,
+                site_log,
+                status_log,
+                delivery_log,
+                komtet_id,
+            )
             await _add_sync_log(
                 session,
                 direction="crm_to_komtet",
@@ -1169,6 +1320,16 @@ async def _sync_retailcrm_to_komtet_locked(
         order_sync.last_synced_at = now
         order_sync.last_error = None
 
+        logger.info(
+            "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=updated "
+            "komtet_id=%s reason=%s",
+            order_id,
+            site_log,
+            status_log,
+            delivery_log,
+            komtet_id,
+            "forced" if force else "payload_changed",
+        )
         await _add_sync_log(
             session,
             direction="crm_to_komtet",
@@ -1198,9 +1359,10 @@ async def _sync_retailcrm_to_komtet_locked(
 
     except (KomtetError, RetailCRMError, ValueError) as exc:
         transient = _is_transient_error(exc)
-        logger.warning(
-            "Sync crm_to_komtet failed for order %s (transient=%s): %s",
+        logger.error(
+            "[SYNC] error direction=crm_to_komtet order=%s komtet_id=%s transient=%s: %s",
             order_id,
+            komtet_id or "-",
             transient,
             exc,
         )
@@ -1241,7 +1403,14 @@ async def _sync_retailcrm_to_komtet_locked(
         }
     except Exception as exc:
         transient = _is_transient_error(exc)
-        logger.exception("Unexpected error syncing RetailCRM order %s to KOMTET", order_id)
+        logger.error(
+            "[SYNC] error unexpected direction=crm_to_komtet order=%s komtet_id=%s transient=%s: %s",
+            order_id,
+            komtet_id or "-",
+            transient,
+            exc,
+            exc_info=True,
+        )
         await _record_unexpected_failure(
             session,
             direction="crm_to_komtet",
@@ -1311,6 +1480,13 @@ async def verify_komtet_callback_signature(
     )
     if not is_valid:
         safe_payload = payload if isinstance(payload, dict) else {}
+        logger.warning(
+            "[KOMTET->RCRM] komtet_id=%s order=%s state=%s -> partial_edit=False "
+            "payment=none final_status=- action=signature_invalid",
+            safe_payload.get("id") or "-",
+            safe_payload.get("external_id") or "-",
+            safe_payload.get("state") or "-",
+        )
         await _add_sync_log(
             session,
             direction="komtet_to_crm",
@@ -1429,6 +1605,12 @@ async def sync_komtet_to_retailcrm(
                 retailcrm_order_id = int(found_orders[0]["id"])
 
         if retailcrm_order_id is None:
+            logger.warning(
+                "[KOMTET->RCRM] komtet_id=%s order=- state=%s -> partial_edit=False "
+                "payment=none final_status=- action=order_not_found",
+                komtet_order_id or "-",
+                state or "-",
+            )
             await _add_sync_log(
                 session,
                 direction="komtet_to_crm",
@@ -1467,7 +1649,13 @@ async def sync_komtet_to_retailcrm(
 
     except (RetailCRMError, KomtetError, ValueError) as exc:
         transient = _is_transient_error(exc)
-        logger.warning("Failed processing KOMTET callback (transient=%s): %s", transient, exc)
+        logger.error(
+            "[SYNC] error direction=komtet_to_crm komtet_id=%s order=%s transient=%s: %s",
+            komtet_order_id or "-",
+            retailcrm_order_id or "-",
+            transient,
+            exc,
+        )
         await session.rollback()
         err_row: Optional[OrderSync] = None
         if retailcrm_order_id is not None:
@@ -1500,7 +1688,14 @@ async def sync_komtet_to_retailcrm(
         }
     except Exception as exc:
         transient = _is_transient_error(exc)
-        logger.exception("Unexpected error processing KOMTET callback")
+        logger.error(
+            "[SYNC] error unexpected direction=komtet_to_crm komtet_id=%s order=%s transient=%s: %s",
+            komtet_order_id or "-",
+            retailcrm_order_id or "-",
+            transient,
+            exc,
+            exc_info=True,
+        )
         await _record_unexpected_failure(
             session,
             direction="komtet_to_crm",
@@ -1552,6 +1747,13 @@ async def _process_komtet_callback_locked(
         and order_sync.komtet_state == state
         and order_sync.sync_status in {"completed", "paid", "canceled"}
     ):
+        logger.info(
+            "[KOMTET->RCRM] komtet_id=%s order=%s state=%s -> partial_edit=False "
+            "payment=none final_status=- action=skipped_duplicate",
+            komtet_order_id or "-",
+            retailcrm_order_id,
+            state or "-",
+        )
         await _add_sync_log(
             session,
             direction="komtet_to_crm",
@@ -1587,6 +1789,13 @@ async def _process_komtet_callback_locked(
         order_sync.last_komtet_callback_hash = callback_hash
         if state == "canceled":
             order_sync.sync_status = "canceled"
+        logger.info(
+            "[KOMTET->RCRM] komtet_id=%s order=%s state=%s -> partial_edit=False "
+            "payment=none final_status=- action=ignored_non_final",
+            komtet_order_id or "-",
+            retailcrm_order_id,
+            state or "-",
+        )
         await _add_sync_log(
             session,
             direction="komtet_to_crm",
@@ -1693,6 +1902,7 @@ async def _process_komtet_callback_locked(
             payment_action = "created"
 
     # 3) Move RetailCRM order to final status (default: 'complete')
+    final_status_applied = False
     if cfg.final_status and crm_order.get("status") != cfg.final_status:
         await crm.edit_order(
             retailcrm_order_id,
@@ -1700,6 +1910,7 @@ async def _process_komtet_callback_locked(
             by="id",
             site=site,
         )
+        final_status_applied = True
 
     # 4) Update OrderSync (recording timestamp for anti-loop) & SyncLog
     order_sync.komtet_order_id = komtet_order_id or order_sync.komtet_order_id
@@ -1712,6 +1923,26 @@ async def _process_komtet_callback_locked(
         f"Prepayment exceeds fiscalized total by {overpaid:.2f}; refund required"
         if overpaid > Decimal("0.00")
         else None
+    )
+
+    payment_summary = (
+        f"{payment_action}({float(remaining_to_pay):.2f}/{target_crm_payment_type})"
+        if payment_action != "none"
+        else "none"
+    )
+    final_status_log = cfg.final_status if final_status_applied else f"{cfg.final_status or '-'}(unchanged)"
+    action_log = f"processed_overpaid({overpaid:.2f})" if overpaid > Decimal("0.00") else "processed"
+    done_log_fn = logger.warning if overpaid > Decimal("0.00") else logger.info
+    done_log_fn(
+        "[KOMTET->RCRM] komtet_id=%s order=%s state=%s -> partial_edit=%s "
+        "payment=%s final_status=%s action=%s",
+        komtet_order_id or "-",
+        retailcrm_order_id,
+        state,
+        items_changed,
+        payment_summary,
+        final_status_log,
+        action_log,
     )
 
     await _add_sync_log(

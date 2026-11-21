@@ -27,6 +27,7 @@ import hashlib
 import hmac
 import json
 import logging
+import time
 from typing import Any, Literal, Optional
 from urllib.parse import quote
 
@@ -39,6 +40,11 @@ ApiVersion = Literal["v1", "v2"]
 TRANSIENT_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
 RETRYABLE_HTTP_STATUSES = frozenset({429, 502, 503, 504})
 DEFAULT_RETRY_DELAYS: tuple[float, ...] = (0.3, 0.7, 1.5)
+
+
+def _truncate_error(text: str, limit: int = 500) -> str:
+    """Collapse whitespace and truncate error details for safe logging."""
+    return " ".join((text or "").split())[:limit]
 
 
 class _DecimalJSONEncoder(json.JSONEncoder):
@@ -166,6 +172,7 @@ class KomtetClient:
     ) -> Any:
         upper_method = method.upper()
         clean_path = "/" + full_api_path.lstrip("/")
+        safe_path = clean_path.split("?", 1)[0]
         url = f"{self._base_url}{clean_path}"
 
         clean_params: Optional[dict[str, Any]] = None
@@ -203,45 +210,64 @@ class KomtetClient:
         follow_redirects = upper_method == "GET"
 
         response: Optional[httpx.Response] = None
-        max_attempts = len(self._retry_delays) + 1
+        total_retries = len(self._retry_delays)
+        max_attempts = total_retries + 1
+        started_at = time.perf_counter()
+
         for attempt in range(max_attempts):
             try:
                 response = await self._client.send(request, follow_redirects=follow_redirects)
             except httpx.TransportError as exc:
-                if attempt < len(self._retry_delays):
+                if attempt < total_retries:
                     delay = self._retry_delays[attempt]
                     logger.warning(
-                        "KOMTET transport error on %s %s (attempt %d/%d), retrying in %.1fs: %s",
-                        upper_method,
-                        request.url,
+                        "[KOMTET] retry %d/%d after %s %s -> %s (delay=%.1fs)",
                         attempt + 1,
-                        max_attempts,
+                        total_retries,
+                        upper_method,
+                        safe_path,
+                        type(exc).__name__,
                         delay,
-                        exc,
                     )
                     await asyncio.sleep(delay)
                     continue
-                logger.exception("KOMTET HTTP transport error on %s %s", upper_method, request.url)
+                elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+                logger.error(
+                    "[KOMTET] %s %s -> %s (%.0f ms): %s",
+                    upper_method,
+                    safe_path,
+                    type(exc).__name__,
+                    elapsed_ms,
+                    _truncate_error(str(exc)),
+                )
                 raise KomtetError(
                     f"KOMTET transport error: {exc}",
                     is_transient=True,
                 ) from exc
             except httpx.HTTPError as exc:
-                logger.exception("KOMTET HTTP error on %s %s", upper_method, request.url)
+                elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+                logger.error(
+                    "[KOMTET] %s %s -> %s (%.0f ms): %s",
+                    upper_method,
+                    safe_path,
+                    type(exc).__name__,
+                    elapsed_ms,
+                    _truncate_error(str(exc)),
+                )
                 raise KomtetError(
                     f"KOMTET HTTP error: {exc}",
                     is_transient=True,
                 ) from exc
 
-            if response.status_code in RETRYABLE_HTTP_STATUSES and attempt < len(self._retry_delays):
+            if response.status_code in RETRYABLE_HTTP_STATUSES and attempt < total_retries:
                 delay = self._retry_delays[attempt]
                 logger.warning(
-                    "KOMTET returned HTTP %d on %s %s (attempt %d/%d), retrying in %.1fs",
-                    response.status_code,
-                    upper_method,
-                    request.url,
+                    "[KOMTET] retry %d/%d after %s %s -> %s (delay=%.1fs)",
                     attempt + 1,
-                    max_attempts,
+                    total_retries,
+                    upper_method,
+                    safe_path,
+                    response.status_code,
                     delay,
                 )
                 await asyncio.sleep(delay)
@@ -249,6 +275,7 @@ class KomtetClient:
             break
 
         assert response is not None
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
 
         parsed_body: Any = None
         if response.content:
@@ -263,12 +290,27 @@ class KomtetClient:
                 code = parsed_body.get("code")
                 description = parsed_body.get("description")
                 msg = title or description or f"KOMTET API error on {upper_method} {clean_path}"
+                err_parts = [
+                    f"{k}={parsed_body[k]}"
+                    for k in ("code", "title", "description", "error")
+                    if parsed_body.get(k) not in (None, "")
+                ]
+                raw_err_body = ", ".join(err_parts) if err_parts else response.text
             else:
                 title = None
                 code = None
                 description = response.text[:500] if response.text else None
                 msg = f"KOMTET API error on {upper_method} {clean_path}"
+                raw_err_body = response.text
 
+            logger.error(
+                "[KOMTET] %s %s -> %s (%.0f ms): %s",
+                upper_method,
+                safe_path,
+                response.status_code,
+                elapsed_ms,
+                _truncate_error(raw_err_body),
+            )
             raise KomtetError(
                 msg,
                 status_code=response.status_code,
@@ -278,6 +320,13 @@ class KomtetClient:
                 response_data=parsed_body,
             )
 
+        logger.info(
+            "[KOMTET] %s %s -> %s (%.0f ms)",
+            upper_method,
+            safe_path,
+            response.status_code,
+            elapsed_ms,
+        )
         return parsed_body
 
     async def _request(

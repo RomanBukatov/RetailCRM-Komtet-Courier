@@ -7,6 +7,7 @@ import {
   ChevronUp,
   RefreshCw,
   Search,
+  Settings,
 } from "lucide-react";
 import { api, ApiError } from "../api";
 import type { SyncLogItem } from "../types";
@@ -49,6 +50,8 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
   callback_duplicate_skipped: "Повторное уведомление",
   callback_order_not_found: "Заказ из уведомления не найден",
   callback_error: "Ошибка обработки уведомления",
+  settings_updated: "Изменение настроек",
+  mappings_updated: "Изменение соответствий",
 };
 
 function getEventTypeLabel(eventType: string): string {
@@ -98,7 +101,27 @@ function getDirectionLabel(direction: string): string {
   if (direction === "komtet_to_crm" || direction === "komtet_to_retailcrm") {
     return "КОМТЕТ → RetailCRM";
   }
+  if (direction === "system") {
+    return "Панель управления";
+  }
   return direction;
+}
+
+function renderDirection(direction: string) {
+  if (direction === "system") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700">
+        <Settings className="h-3.5 w-3.5 text-indigo-500" />
+        {getDirectionLabel(direction)}
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 font-medium text-slate-700">
+      <ArrowLeftRight className="h-3.5 w-3.5 text-slate-400" />
+      {getDirectionLabel(direction)}
+    </span>
+  );
 }
 
 export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
@@ -200,6 +223,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
               <option value="all">Все направления</option>
               <option value="retailcrm_to_komtet">RetailCRM → КОМТЕТ</option>
               <option value="komtet_to_retailcrm">КОМТЕТ → RetailCRM</option>
+              <option value="system">Панель управления</option>
             </select>
 
             {/* Поиск по order_id */}
@@ -282,10 +306,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
                   </div>
 
                   <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-                    <span className="inline-flex items-center gap-1 font-medium text-slate-700">
-                      <ArrowLeftRight className="h-3.5 w-3.5 text-slate-400" />
-                      {getDirectionLabel(log.direction)}
-                    </span>
+                    {renderDirection(log.direction)}
                     <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-700">
                       {getEventTypeLabel(log.event_type)}
                     </span>
@@ -398,10 +419,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({ onUnauthorized }) => {
                         </td>
                         <td className="px-3 py-3">{getLogBadge(log)}</td>
                         <td className="whitespace-nowrap px-3 py-3 text-xs font-medium text-slate-700">
-                          <span className="inline-flex items-center gap-1">
-                            <ArrowLeftRight className="h-3.5 w-3.5 text-slate-400" />
-                            {getDirectionLabel(log.direction)}
-                          </span>
+                          {renderDirection(log.direction)}
                         </td>
                         <td className="px-3 py-3 text-xs text-slate-700">
                           {getEventTypeLabel(log.event_type)}

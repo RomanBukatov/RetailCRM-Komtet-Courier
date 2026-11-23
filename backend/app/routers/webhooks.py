@@ -97,6 +97,7 @@ def _body_preview(raw_body: bytes) -> str:
 def _extract_webhook_fields(
     data: dict[str, Any],
 ) -> tuple[Optional[int], Optional[str], Optional[str]]:
+    data = {key.strip(): value for key, value in data.items()}
     raw_event = data.get("event") or data.get("trigger")
     event = str(raw_event).strip()[:64] if raw_event else None
 

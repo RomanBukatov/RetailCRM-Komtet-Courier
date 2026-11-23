@@ -2465,6 +2465,8 @@ async def test_done_callback_reconciliation(tmp_path: Path, scenario: str) -> No
 @pytest.mark.parametrize(("content_type", "body"), [
     ("", b"order_id=315454."),
     ("application/x-www-form-urlencoded", b"order_id=315454%0A"),
+    ("application/x-www-form-urlencoded", b"order_id =315454"),
+    ("application/x-www-form-urlencoded", b"order_id+=315454"),
     ("text/plain", b"order_id=315454"),
     ("multipart/form-data; boundary=TestABC",
      b'--TestABC\r\nContent-Disposition: form-data; name="order_id"\r\n\r\n315454\r\n--TestABC--\r\n'),

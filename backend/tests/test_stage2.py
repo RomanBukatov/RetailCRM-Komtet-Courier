@@ -2461,3 +2461,21 @@ async def test_done_callback_reconciliation(tmp_path: Path, scenario: str) -> No
             assert order["status"] == "delivering"
 
     await engine.dispose()
+
+@pytest.mark.parametrize(("content_type", "body"), [
+    ("", b"order_id=315454."),
+    ("application/x-www-form-urlencoded", b"order_id=315454%0A"),
+    ("text/plain", b"order_id=315454"),
+    ("multipart/form-data; boundary=TestABC",
+     b'--TestABC\r\nContent-Disposition: form-data; name="order_id"\r\n\r\n315454\r\n--TestABC--\r\n'),
+])
+def test_retailcrm_body_order_id(content_type, body):
+    fields = webhooks._body_fields(body, content_type)
+    assert webhooks._extract_webhook_fields(fields)[0] == 315454
+
+
+def test_retailcrm_invalid_order_preview():
+    assert webhooks._parse_positive_int("{{ order.id }}") is None
+    preview = webhooks._body_preview(b"order_id=%7B%7B+order.id+%7D%7D&%74oken=secret")
+    assert "{{ order.id }}" in preview
+    assert "secret" not in preview

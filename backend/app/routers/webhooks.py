@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
+from email import policy
+from email.parser import BytesParser
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, unquote_plus
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,13 +46,52 @@ def get_komtet_factory() -> Callable[[RuntimeConfig], KomtetClient]:
 
 
 def _parse_positive_int(raw: Any) -> Optional[int]:
-    if raw is None or isinstance(raw, bool):
+    if not isinstance(raw, (str, int)) or isinstance(raw, bool):
         return None
     try:
-        value = int(str(raw).strip())
+        digits = str(raw).strip().strip(" \t\r\n.,;:!?'\"()").strip()
+        if not digits.removeprefix("+").isdecimal():
+            return None
+        value = int(digits)
     except (TypeError, ValueError):
         return None
     return value if value > 0 else None
+
+
+def _body_fields(raw_body: bytes, content_type: str) -> dict[str, Any]:
+    text = raw_body.decode("utf-8", errors="replace")
+    if text.lstrip().startswith("{"):
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                return obj
+        except ValueError:
+            pass
+    if content_type.partition(";")[0].strip().lower() == "multipart/form-data":
+        message = BytesParser(policy=policy.default).parsebytes(
+            b"Content-Type: " + content_type.encode("latin-1") + b"\r\n\r\n" + raw_body
+        )
+        if message.is_multipart():
+            fields = {}
+            for part in message.iter_parts():
+                name = part.get_param("name", header="content-disposition")
+                if name and part.get_filename() is None and not part.is_multipart():
+                    fields[name] = part.get_payload(decode=True).decode("utf-8", errors="replace")
+            return fields
+    return {k: v[0] for k, v in parse_qs(text).items()}
+
+
+def _body_preview(raw_body: bytes) -> str:
+    text = unquote_plus(raw_body.decode("utf-8", errors="replace"))
+    # Normalize escaped JSON keys before looking for credentials.
+    try:
+        text = json.dumps(json.loads(text), ensure_ascii=False)
+    except ValueError:
+        pass
+    token = re.search("token", text, flags=re.IGNORECASE)
+    if token:
+        text = text[:token.start()] + "token=[redacted]"
+    return ascii(text[:200])[1:-1][:200]
 
 
 def _extract_webhook_fields(
@@ -113,42 +155,25 @@ async def retailcrm_webhook(
         order_id, trigger_event, webhook_site = _extract_webhook_fields(query_params)
 
     raw_body = await request.body() if request.method == "POST" else b""
+    content_type = request.headers.get("content-type", "")
     if raw_body and (order_id is None or trigger_event is None or webhook_site is None):
-        content_type = request.headers.get("content-type", "").lower()
-        body_text = raw_body.decode("utf-8", errors="replace")
-
-        def _merge(data: dict[str, Any]) -> None:
-            nonlocal order_id, trigger_event, webhook_site
-            b_id, b_event, b_site = _extract_webhook_fields(data)
-            if order_id is None and b_id is not None:
-                order_id = b_id
-            if trigger_event is None and b_event is not None:
-                trigger_event = b_event
-            if webhook_site is None and b_site is not None:
-                webhook_site = b_site
-
-        if "application/json" in content_type or body_text.lstrip().startswith("{"):
-            try:
-                parsed = json.loads(body_text)
-                if isinstance(parsed, dict):
-                    _merge(parsed)
-            except ValueError:
-                pass
-        if order_id is None or trigger_event is None or webhook_site is None:
-            parsed_form = parse_qs(body_text, keep_blank_values=False)
-            flat_form = {k: v[0] for k, v in parsed_form.items() if v}
-            if flat_form:
-                _merge(flat_form)
+        fields = _body_fields(raw_body, content_type)
+        body_id, body_event, body_site = _extract_webhook_fields(fields)
+        order_id = order_id or body_id
+        trigger_event = trigger_event or body_event
+        webhook_site = webhook_site or body_site
 
     if order_id is None:
         elapsed_ms = (time.perf_counter() - started_at) * 1000.0
         logger.warning(
             "[Webhook/RetailCRM] incoming method=%s ip=%s order_id=None site=%s event=%s "
-            "-> status=invalid reason=missing_order_id http_status=422 (%.0f ms)",
+            "-> status=invalid reason=missing_order_id http_status=422 content_type=%r body_preview=%s (%.0f ms)",
             request.method,
             client_ip,
             webhook_site or "-",
             trigger_event or "webhook",
+            content_type,
+            _body_preview(raw_body),
             elapsed_ms,
         )
         raise HTTPException(

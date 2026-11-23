@@ -1286,12 +1286,6 @@ async def _sync_retailcrm_to_komtet_locked(
 
         # Existing KOMTET order -> check hash idempotency unless forced
         if not force and order_sync.last_hash == payload_hash:
-            warning = None
-            if crm_komtet_id != komtet_id:
-                warning = await _write_back_komtet_id(
-                    session, crm=crm, cfg=cfg, order_id=order_id, site=resolved_site,
-                    komtet_id=komtet_id, order_sync=order_sync,
-                )
             logger.info(
                 "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=skipped "
                 "komtet_id=%s reason=unchanged",
@@ -1312,15 +1306,12 @@ async def _sync_retailcrm_to_komtet_locked(
                 payload={"trigger_event": trigger_event},
             )
             await session.commit()
-            result = {
+            return {
                 "status": "skipped",
                 "reason": "unchanged",
                 "retailcrm_order_id": order_id,
                 "komtet_order_id": komtet_id,
             }
-            if warning:
-                result["warning"] = warning
-            return result
 
         # Never send `state` on update: it would reset the courier workflow state in KOMTET.
         update_payload = {k: v for k, v in komtet_payload.items() if k != "state"}
@@ -1380,20 +1371,11 @@ async def _sync_retailcrm_to_komtet_locked(
         )
         await session.commit()
 
-        warning = None
-        if crm_komtet_id != komtet_id:
-            warning = await _write_back_komtet_id(
-                session, crm=crm, cfg=cfg, order_id=order_id, site=resolved_site,
-                komtet_id=komtet_id, order_sync=order_sync,
-            )
-        result = {
+        return {
             "status": "updated",
             "retailcrm_order_id": order_id,
             "komtet_order_id": komtet_id,
         }
-        if warning:
-            result["warning"] = warning
-        return result
 
     except (KomtetError, RetailCRMError, ValueError) as exc:
         transient = _is_transient_error(exc)

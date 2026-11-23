@@ -359,12 +359,21 @@ async def test_forward_sync_create_update_cancel_and_srv00_error(tmp_path: Path)
         assert crm_state["edits"][0] == {"customFields": {"komtet_id": 8881}}
         assert isinstance(crm_state["edits"][0]["customFields"]["komtet_id"], int)
 
+        # The manager saves an open card and clears the integration field.
+        assert len(crm_state["edits"]) == 1
+        crm_state["order"]["customFields"]["komtet_id"] = None
+        crm_state["edits"].clear()
+        komtet_calls.clear()
+
         # 2) Same payload again -> skipped due to identical SHA-256 hash
         res2 = await sync_retailcrm_to_komtet(
             db, 777, crm_client=crm_cli, komtet_client=komtet_cli
         )
         assert res2["status"] == "skipped"
         assert res2["reason"] == "unchanged"
+        assert res2["komtet_order_id"] == 8881
+        assert not crm_state["edits"]
+        assert not komtet_calls
 
         # 3) Order changed (e.g., comment updated) -> update_order called
         crm_state["order"]["customerComment"] = "Позвонить за час"
@@ -372,7 +381,10 @@ async def test_forward_sync_create_update_cancel_and_srv00_error(tmp_path: Path)
             db, 777, crm_client=crm_cli, komtet_client=komtet_cli
         )
         assert res3["status"] == "updated"
-        assert komtet_calls[-1][0] == "PUT"
+        assert [(method, path) for method, path, _ in komtet_calls] == [
+            ("PUT", "/api/shop/v2/orders/8881")
+        ]
+        assert not crm_state["edits"]
 
         # 4) KOMTET 403 SRV00 error is logged in sync_logs without crashing
         crm_state["order"]["customerComment"] = "Другой комментарий"

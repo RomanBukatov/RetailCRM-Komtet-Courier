@@ -48,6 +48,7 @@ class RuntimeConfig:
     komtet_custom_field_code: str
     app_timezone: str = "Europe/Moscow"
     allowed_delivery_codes: list[str] = field(default_factory=list)
+    require_mark_code: bool = False
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,7 @@ SETTING_DEFINITIONS: dict[str, tuple[str, bool, str, Any]] = {
     "default_delivery_time_from": ("string", False, "Время доставки по умолчанию (с)", "09:00"),
     "default_delivery_time_to": ("string", False, "Время доставки по умолчанию (до)", "21:00"),
     "komtet_callback_url": ("string", False, "Публичный URL для callback от КОМТЕТ", ""),
+    "require_mark_code": ("bool", False, "Запрашивать сканирование маркировки", False),
     "verify_komtet_signature": ("bool", False, "Проверять X-HMAC-Signature от КОМТЕТ", True),
     "anti_loop_seconds": ("int", False, "Окно защиты от петли после callback (сек)", 15),
     "auto_sync_enabled": ("bool", False, "Автоматическая синхронизация по вебхукам", True),
@@ -309,6 +311,7 @@ async def load_runtime_config(
         komtet_callback_url=str(
             get_val("komtet_callback_url", env.resolved_komtet_callback_url)
         ).strip(),
+        require_mark_code=bool(get_val("require_mark_code")),
         verify_komtet_signature=bool(get_val("verify_komtet_signature")),
         anti_loop_seconds=int(get_val("anti_loop_seconds")),
         auto_sync_enabled=bool(get_val("auto_sync_enabled")),
@@ -368,6 +371,7 @@ async def get_settings_response(
         default_delivery_time_from=cfg.default_delivery_time_from,
         default_delivery_time_to=cfg.default_delivery_time_to,
         komtet_callback_url=cfg.komtet_callback_url,
+        require_mark_code=cfg.require_mark_code,
         verify_komtet_signature=cfg.verify_komtet_signature,
         anti_loop_seconds=cfg.anti_loop_seconds,
         auto_sync_enabled=cfg.auto_sync_enabled,

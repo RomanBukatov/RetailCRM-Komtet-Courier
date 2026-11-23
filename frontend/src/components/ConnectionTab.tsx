@@ -118,6 +118,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
   const [antiLoopSeconds, setAntiLoopSeconds] = useState<number>(15);
   const [customFieldCode, setCustomFieldCode] = useState("komtet_id");
   const [autoSyncEnabled, setAutoSyncEnabled] = useState(true);
+  const [requireMarkCode, setRequireMarkCode] = useState(false);
   const [verifyKomtetSignature, setVerifyKomtetSignature] = useState(true);
 
   const [saving, setSaving] = useState(false);
@@ -169,6 +170,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
     setAntiLoopSeconds(settings.anti_loop_seconds ?? 15);
     setCustomFieldCode(settings.komtet_custom_field_code || "komtet_id");
     setAutoSyncEnabled(settings.auto_sync_enabled ?? true);
+    setRequireMarkCode(settings.require_mark_code ?? false);
     setVerifyKomtetSignature(settings.verify_komtet_signature ?? true);
   }, [settings]);
 
@@ -212,6 +214,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
       default_delivery_time_from: deliveryTimeFrom.trim(),
       default_delivery_time_to: deliveryTimeTo.trim(),
       komtet_callback_url: komtetCallbackUrl.trim(),
+      require_mark_code: requireMarkCode,
       verify_komtet_signature: verifyKomtetSignature,
       anti_loop_seconds: Number(antiLoopSeconds) || 0,
       auto_sync_enabled: autoSyncEnabled,
@@ -706,6 +709,23 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
               type="checkbox"
               checked={autoSyncEnabled}
               onChange={(e) => setAutoSyncEnabled(e.target.checked)}
+              className="h-5 w-5 shrink-0 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+            />
+          </label>
+
+          <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 hover:bg-slate-100/70">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-slate-900">
+                Запрашивать сканирование маркировки (Честный ЗНАК)
+              </div>
+              <div className="text-xs text-slate-500">
+                Передаёт в КОМТЕТ признак маркированного товара (кроме услуги доставки), чтобы приложение курьера открывало сканер DataMatrix перед закрытием чека.
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={requireMarkCode}
+              onChange={(e) => setRequireMarkCode(e.target.checked)}
               className="h-5 w-5 shrink-0 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
             />
           </label>

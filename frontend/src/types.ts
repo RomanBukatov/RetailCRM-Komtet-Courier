@@ -32,6 +32,7 @@ export interface SettingsResponse {
   default_delivery_time_from: string;
   default_delivery_time_to: string;
   komtet_callback_url: string;
+  require_mark_code: boolean;
   verify_komtet_signature: boolean;
   anti_loop_seconds: number;
   auto_sync_enabled: boolean;
@@ -59,6 +60,7 @@ export interface SettingsUpdateRequest {
   default_delivery_time_from?: string;
   default_delivery_time_to?: string;
   komtet_callback_url?: string;
+  require_mark_code?: boolean;
   verify_komtet_signature?: boolean;
   anti_loop_seconds?: number;
   auto_sync_enabled?: boolean;

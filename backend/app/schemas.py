@@ -57,6 +57,7 @@ class SettingsResponse(BaseModel):
     default_delivery_time_from: str = "09:00"
     default_delivery_time_to: str = "21:00"
     komtet_callback_url: str = ""
+    require_mark_code: bool = False
     verify_komtet_signature: bool = True
     anti_loop_seconds: int = 15
     auto_sync_enabled: bool = True
@@ -86,6 +87,7 @@ class SettingsUpdateRequest(BaseModel):
     default_delivery_time_from: Optional[str] = None
     default_delivery_time_to: Optional[str] = None
     komtet_callback_url: Optional[str] = None
+    require_mark_code: Optional[bool] = None
     verify_komtet_signature: Optional[bool] = None
     anti_loop_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
     auto_sync_enabled: Optional[bool] = None

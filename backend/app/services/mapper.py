@@ -367,6 +367,7 @@ def _split_item_for_exact_total(
     quantity: Decimal,
     target_total: Decimal,
     *,
+    require_mark_code: bool = False,
     api_version: Literal["v1", "v2"],
 ) -> list[dict[str, Any]]:
     """Ensure `price * quantity == total` to the exact kopeck for integer quantities."""
@@ -406,7 +407,7 @@ def _split_item_for_exact_total(
             "vat": vat,
             "measure": 0,
             "type": item_type,
-            "is_need_nomenclature_code": False,
+            "is_need_mark_code": item_type == "product" and require_mark_code,
         }
 
     if quantity == Decimal("1"):
@@ -545,6 +546,7 @@ def map_retailcrm_order_to_komtet(
                 base_item,
                 base_item["quantity"],
                 adj_total,
+                require_mark_code=config.require_mark_code,
                 api_version=api_version,
             )
         )

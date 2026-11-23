@@ -175,7 +175,8 @@ def test_mapper_phone_address_delivery_window_and_vat() -> None:
     assert map_vat_rate(None, vat_map, default_vat="22") == "22"
 
 
-def test_mapper_discounts_penny_exact_split_delivery_and_prepayment() -> None:
+@pytest.mark.parametrize("require_mark_code", [False, True])
+def test_mapper_discounts_penny_exact_split_delivery_and_prepayment(require_mark_code: bool) -> None:
     """Order discount creating odd cents per unit must split into exact price*quantity==total lines."""
     crm_order = {
         "id": 5001,
@@ -212,7 +213,7 @@ def test_mapper_discounts_penny_exact_split_delivery_and_prepayment() -> None:
 
     payload, payload_hash = map_retailcrm_order_to_komtet(
         crm_order,
-        _sample_config(komtet_api_version="v2"),
+        _sample_config(komtet_api_version="v2", require_mark_code=require_mark_code),
         _sample_mappings(),
     )
 
@@ -243,6 +244,10 @@ def test_mapper_discounts_penny_exact_split_delivery_and_prepayment() -> None:
 
     delivery_lines = [i for i in items if i["type"] == "service"]
     assert len(delivery_lines) == 1
+    assert delivery_lines[0]["external_id"] == "delivery"
+    assert delivery_lines[0].get("is_need_mark_code", False) is False
+    assert all(i["is_need_mark_code"] is require_mark_code for i in product_lines)
+    assert all("is_need_nomenclature_code" not in i for i in items)
     assert delivery_lines[0]["name"] == "Доставка"
     assert delivery_lines[0]["total"] == 350.0
     assert delivery_lines[0]["vat"] == "22"

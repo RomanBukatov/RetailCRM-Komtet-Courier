@@ -81,6 +81,7 @@ const VALIDATION_FIELD_LABELS: Record<string, string> = {
   default_delivery_time_from: "Время доставки «с»",
   default_delivery_time_to: "Время доставки «до»",
   komtet_callback_url: "Адрес для обратных уведомлений от КОМТЕТ",
+  require_mark_code: "Запрашивать сканирование маркировки (Честный ЗНАК)",
   verify_komtet_signature: "Проверка подлинности уведомлений",
   anti_loop_seconds: "Пауза против повторной отправки",
   auto_sync_enabled: "Автоматическая синхронизация",

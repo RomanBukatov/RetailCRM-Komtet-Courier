@@ -180,7 +180,7 @@ def test_mapper_discounts_penny_exact_split_delivery_and_prepayment(require_mark
     """Order discount creating odd cents per unit must split into exact price*quantity==total lines."""
     crm_order = {
         "id": 5001,
-        "number": "5001A",
+        "number": "31553401",
         "site": "main-site",
         "status": "send-to-delivery",
         "firstName": "Иван",
@@ -217,7 +217,7 @@ def test_mapper_discounts_penny_exact_split_delivery_and_prepayment(require_mark
         _sample_mappings(),
     )
 
-    assert payload["external_id"] == "5001"
+    assert payload["external_id"] == "31553401"
     assert payload["company"]["sno"] == 0
     assert payload["courier_id"] == 701
     assert payload["client"]["phone"] == "+79161112233"
@@ -258,7 +258,7 @@ def test_mapper_discounts_penny_exact_split_delivery_and_prepayment(require_mark
         _sample_config(komtet_api_version="v1"),
         _sample_mappings(),
     )
-    assert payload_v1["order_id"] == 5001
+    assert payload_v1["order_id"] == "31553401"
     assert payload_v1["sno"] == 0
     assert payload_v1["is_paid"] is False
     assert payload_v1["client_phone"] == "+79161112233"
@@ -416,8 +416,9 @@ async def test_forward_sync_create_update_cancel_and_srv00_error(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("local_link", [True, False])
 async def test_reverse_sync_partial_redemption_payment_idempotency_and_antiloop(
-    tmp_path: Path,
+    tmp_path: Path, local_link: bool,
 ) -> None:
     db_url = f"sqlite+aiosqlite:///{(tmp_path / 'reverse.db').as_posix()}"
     engine = create_engine(db_url)
@@ -425,8 +426,8 @@ async def test_reverse_sync_partial_redemption_payment_idempotency_and_antiloop(
     session_maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     crm_order = {
-        "id": 900,
-        "number": "900",
+        "id": 315534,
+        "number": "31553401",
         "site": "main-site",
         "status": "delivering",
         "summ": 1500.0,
@@ -456,9 +457,13 @@ async def test_reverse_sync_partial_redemption_payment_idempotency_and_antiloop(
     crm_calls: list[tuple[str, str, dict[str, Any]]] = []
 
     def crm_handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/v5/orders/900" and request.method == "GET":
+        if request.url.path == "/api/v5/orders":
+            assert not local_link
+            assert request.url.params["filter[numbers][]"] == "31553401"
+            return httpx.Response(200, json={"orders": [{"id": 315534, "number": "31553401"}]})
+        if request.url.path == "/api/v5/orders/315534" and request.method == "GET":
             return httpx.Response(200, json={"success": True, "order": crm_order})
-        if request.url.path == "/api/v5/orders/900/edit" and request.method == "POST":
+        if request.url.path == "/api/v5/orders/315534/edit" and request.method == "POST":
             form = parse_qs(request.content.decode("utf-8"))
             patch = json.loads(form["order"][0])
             crm_calls.append(("edit_order", request.url.path, patch))
@@ -467,7 +472,7 @@ async def test_reverse_sync_partial_redemption_payment_idempotency_and_antiloop(
                 crm_order["totalSumm"] = 500.0
             if "status" in patch:
                 crm_order["status"] = patch["status"]
-            return httpx.Response(200, json={"success": True, "id": 900})
+            return httpx.Response(200, json={"success": True, "id": 315534})
         if request.url.path == "/api/v5/orders/payments/create" and request.method == "POST":
             form = parse_qs(request.content.decode("utf-8"))
             pay = json.loads(form["payment"][0])
@@ -483,7 +488,7 @@ async def test_reverse_sync_partial_redemption_payment_idempotency_and_antiloop(
     # Courier delivered only 1 unit of item 101 (instead of 2) and removed item 102; paid by card.
     callback_payload = {
         "id": 4455,
-        "external_id": "900",
+        "external_id": "31553401",
         "state": "done",
         "payments": [{"type": "card", "sum": 500.0}],
         "items": [
@@ -509,15 +514,9 @@ async def test_reverse_sync_partial_redemption_payment_idempotency_and_antiloop(
         httpx.AsyncClient(transport=httpx.MockTransport(crm_handler)) as crm_http,
         httpx.AsyncClient(transport=httpx.MockTransport(lambda _r: httpx.Response(200))) as k_http,
     ):
-        db.add(
-            OrderSync(
-                retailcrm_order_id=900,
-                komtet_order_id=4455,
-                komtet_external_id="900",
-                sync_status="synced",
-            )
-        )
-        await db.commit()
+        if local_link:
+            db.add(OrderSync(retailcrm_order_id=315534, komtet_external_id="31553401"))
+            await db.commit()
 
         crm_cli = RetailCRMClient("https://example.retailcrm.ru", "test-key", client=crm_http)
         komtet_cli = KomtetClient("test-shop-id", "test-komtet-secret-8888", client=k_http)
@@ -563,8 +562,9 @@ async def test_reverse_sync_partial_redemption_payment_idempotency_and_antiloop(
         assert crm_calls[1][0] == "create_payment"
         assert crm_calls[1][2]["type"] == "bank-card"
         assert crm_calls[1][2]["status"] == "paid"
+        assert crm_calls[1][2]["order"] == {"id": 315534}
         assert crm_calls[1][2]["amount"] == 500.0
-        assert crm_calls[2] == ("edit_order", "/api/v5/orders/900/edit", {"status": "complete"})
+        assert crm_calls[2] == ("edit_order", "/api/v5/orders/315534/edit", {"status": "complete"})
 
         # Idempotency: exact same callback again -> skipped without duplicating payment
         calls_before = len(crm_calls)
@@ -583,7 +583,7 @@ async def test_reverse_sync_partial_redemption_payment_idempotency_and_antiloop(
         # Anti-loop: RetailCRM webhook fired right after callback is skipped
         loop_res = await sync_retailcrm_to_komtet(
             db,
-            900,
+            315534,
             trigger_event="order_edit",
             crm_client=crm_cli,
             komtet_client=komtet_cli,
@@ -613,13 +613,13 @@ async def test_reverse_sync_partial_redemption_payment_idempotency_and_antiloop(
                 }
             ],
         }
-        # Point order 901 to same mock handler via 900 path? Use 900 with reset OrderSync for clean test:
-        osync = await db.scalar(select(OrderSync).where(OrderSync.retailcrm_order_id == 900))
+        # Point order 901 to same mock handler via 315534 path? Use 315534 with reset OrderSync for clean test:
+        osync = await db.scalar(select(OrderSync).where(OrderSync.retailcrm_order_id == 315534))
         assert osync is not None
         osync.last_komtet_callback_hash = None
         await db.commit()
         cash_cb["id"] = 4455
-        cash_cb["external_id"] = "900"
+        cash_cb["external_id"] = "315534"
         cash_body = json.dumps(cash_cb).encode("utf-8")
         cash_sig = KomtetClient.compute_signature(
             "test-komtet-secret-8888", "POST", callback_url, cash_body.decode("utf-8")
@@ -1277,7 +1277,8 @@ async def test_clients_retry_on_429_503_and_transport_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_idempotency_prepay_sum_done_guard_resolve_link_and_rollback(tmp_path: Path) -> None:
+@pytest.mark.parametrize("owner", ["910", "91001"])
+async def test_idempotency_prepay_sum_done_guard_resolve_link_and_rollback(tmp_path: Path, owner: str) -> None:
     """[HIGH #9, #10, #11, #17] externalId, prepaySum, MSK paidAt, done guard, link recovery, rollback."""
     db_url = f"sqlite+aiosqlite:///{(tmp_path / 'audit_sync.db').as_posix()}"
     engine = create_engine(db_url)
@@ -1288,9 +1289,12 @@ async def test_idempotency_prepay_sum_done_guard_resolve_link_and_rollback(tmp_p
     crm_get_sites: list[str | None] = []
     crm_fail_mode = {"fail_503": False}
     komtet_calls: list[tuple[str, str]] = []
-    komtet_get_payload: dict[str, Any] = {"id": 5000, "external_id": "910", "state": "done"}
+    komtet_get_payload: dict[str, Any] = {"id": 5000, "external_id": owner, "state": "done"}
 
     def crm_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v5/orders" and request.method == "GET":
+            assert request.url.params["filter[numbers][]"] == "910"
+            return httpx.Response(200, json={"orders": []})
         if request.url.path == "/api/v5/orders/910" and request.method == "GET":
             crm_get_sites.append(request.url.params.get("site"))
             if crm_fail_mode["fail_503"]:
@@ -1301,7 +1305,7 @@ async def test_idempotency_prepay_sum_done_guard_resolve_link_and_rollback(tmp_p
                     "success": True,
                     "order": {
                         "id": 910,
-                        "number": "910",
+                        "number": "91001",
                         "site": "main-site",
                         "status": "cancel-other",
                         "totalSumm": 1000.0,
@@ -1478,6 +1482,8 @@ async def test_webhooks_http_503_retry_hmac_before_factory_proxy_ports_and_form_
     mode = {"crm_503": False, "komtet_srv00": False}
 
     def crm_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v5/orders" and request.method == "GET":
+            return httpx.Response(200, json={"orders": []})
         if request.url.path in {"/api/v5/orders/1500", "/api/v5/orders/1501"} and request.method == "GET":
             oid = int(request.url.path.rsplit("/", 1)[-1])
             seen_crm_sites.append(request.url.params.get("site"))
@@ -1962,7 +1968,7 @@ async def test_allowed_delivery_codes_filtering(tmp_path: Path) -> None:
         )
         assert res_ok["status"] == "created"
         assert len(komtet_posts) == 1
-        assert komtet_posts[0]["external_id"] == "315271"
+        assert komtet_posts[0]["external_id"] == "304238"
 
         # 3) Manual override (`ignore_status_filter=True`) bypasses delivery filter
         res_manual = await sync_retailcrm_to_komtet(
@@ -2336,6 +2342,7 @@ def test_delivery_payload_version_and_largest_remainder() -> None:
         payload, _ = map_retailcrm_order_to_komtet(
             order, _sample_config(komtet_api_version=version), _sample_mappings()
         )
+        assert payload["external_id" if version == "v2" else "order_id"] == "1"
         assert payload["date_start"] == f"{date_part} 09:00"
         assert payload["date_end"] == f"{date_part} 21:00"
 

@@ -479,7 +479,7 @@ def map_retailcrm_order_to_komtet(
 ) -> tuple[dict[str, Any], str]:
     """Map a RetailCRM API v5 order into a KOMTET Kassa v1 or v2 delivery order payload."""
     api_version = config.komtet_api_version
-    crm_order_id = order["id"]
+    external_id = str(order.get("number") or order["id"]).strip()
 
     raw_items = order.get("items") or []
     prepared_items: list[dict[str, Any]] = []
@@ -651,7 +651,7 @@ def map_retailcrm_order_to_komtet(
 
     if api_version == "v1":
         payload: dict[str, Any] = {
-            "order_id": int(crm_order_id),
+            "order_id": external_id,
             "sno": int(config.tax_system),
             "state": "new",
             "is_paid": is_fully_paid,
@@ -688,7 +688,7 @@ def map_retailcrm_order_to_komtet(
             company_obj["inn"] = config.company_inn
 
         payload = {
-            "external_id": str(crm_order_id),
+            "external_id": external_id,
             "state": "new",
             "is_pay_to_courier": not is_fully_paid,
             "prepayment": float(prepayment),

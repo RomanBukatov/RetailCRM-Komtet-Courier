@@ -593,7 +593,7 @@ async def _resolve_komtet_link(
     local link (lost DB, restored backup, or an order *copied* in RetailCRM, which copies
     custom fields) is adopted only after verifying it is not linked to another CRM order and
     that the KOMTET order explicitly belongs to this RetailCRM order (`external_id`/`order_id`
-    is present and equals `str(order_id)`).
+    matches the visible order number or legacy internal ID).
     """
     if order_sync.komtet_order_id is not None:
         if order_sync.sync_status == "canceled":
@@ -640,7 +640,7 @@ async def _resolve_komtet_link(
     owner = info.get("external_id")
     if owner in (None, ""):
         owner = info.get("order_id")
-    if owner in (None, "") or str(owner).strip() != str(order_id):
+    if owner in (None, "") or str(owner).strip() not in {str(order_id), order_sync.retailcrm_order_number}:
         return (
             None,
             (
@@ -650,6 +650,7 @@ async def _resolve_komtet_link(
             None,
         )
 
+    order_sync.komtet_external_id = str(owner).strip()
     remote_state = str(info.get("state") or "").strip().lower() or None
     return (
         crm_komtet_id,
@@ -811,7 +812,7 @@ async def _sync_retailcrm_to_komtet_locked(
         site_log = resolved_site or "-"
         status_log = status or "-"
         delivery_log = delivery_code or "-"
-        order_number = str(order.get("number") or "")
+        order_number = str(order.get("number") or "").strip()
         crm_komtet_id = _extract_komtet_id_from_order(order, cfg.komtet_custom_field_code)
 
         if order_sync is None:
@@ -819,7 +820,7 @@ async def _sync_retailcrm_to_komtet_locked(
                 retailcrm_order_id=order_id,
                 retailcrm_order_number=order_number or None,
                 retailcrm_site=resolved_site,
-                komtet_external_id=str(order_id),
+                komtet_external_id=order_number or str(order_id),
                 sync_status="pending",
             )
             session.add(order_sync)
@@ -1235,7 +1236,7 @@ async def _sync_retailcrm_to_komtet_locked(
             # Persist the link immediately: if anything below fails, the next sync must
             # update this KOMTET order instead of creating a duplicate one.
             order_sync.komtet_order_id = new_komtet_id
-            order_sync.komtet_external_id = str(order_id)
+            order_sync.komtet_external_id = str(komtet_payload.get("external_id") or komtet_payload["order_id"])
             order_sync.komtet_state = str(created.get("state") or "new")
             order_sync.sync_status = "synced"
             order_sync.last_hash = payload_hash
@@ -1342,7 +1343,7 @@ async def _sync_retailcrm_to_komtet_locked(
             return await _create_in_komtet(f"KOMTET order #{komtet_id} was missing")
 
         order_sync.komtet_order_id = komtet_id
-        order_sync.komtet_external_id = str(order_id)
+        order_sync.komtet_external_id = str(komtet_payload.get("external_id") or komtet_payload["order_id"])
         order_sync.komtet_state = str(updated.get("state") or order_sync.komtet_state or "new")
         order_sync.sync_status = "synced"
         order_sync.last_hash = payload_hash
@@ -1581,9 +1582,12 @@ async def sync_komtet_to_retailcrm(
                 select(OrderSync).where(OrderSync.komtet_order_id == komtet_order_id)
             )
         if order_sync is None and raw_ext_id is not None:
-            order_sync = await session.scalar(
-                select(OrderSync).where(OrderSync.komtet_external_id == str(raw_ext_id))
-            )
+            links = (await session.scalars(
+                select(OrderSync).where(OrderSync.komtet_external_id == str(raw_ext_id)).limit(2)
+            )).all()
+            if len(links) > 1:
+                raise ValueError(f"Ambiguous local KOMTET external_id {raw_ext_id!r}")
+            order_sync = links[0] if links else None
             if order_sync is None:
                 try:
                     ext_int = int(raw_ext_id)
@@ -1594,14 +1598,28 @@ async def sync_komtet_to_retailcrm(
                     pass
 
         retailcrm_order_id = order_sync.retailcrm_order_id if order_sync is not None else None
-        if retailcrm_order_id is None and raw_ext_id is not None:
-            try:
-                retailcrm_order_id = int(raw_ext_id)
-            except (TypeError, ValueError):
-                retailcrm_order_id = None
-
         if crm is None:
             crm = build_retailcrm_client(cfg)
+
+        if retailcrm_order_id is None and raw_ext_id is not None:
+            filters = {"numbers": [str(raw_ext_id)]}
+            if cfg.retailcrm_default_site:
+                filters["sites"] = [cfg.retailcrm_default_site]
+            matches = (await crm.get_orders(filters=filters, limit=2)).get("orders") or []
+            if len(matches) > 1:
+                raise ValueError(f"Ambiguous RetailCRM order number {raw_ext_id!r}")
+            if matches:
+                retailcrm_order_id = int(matches[0]["id"])
+            elif str(raw_ext_id).isdecimal():
+                try:
+                    legacy_order = await crm.get_order(
+                        int(raw_ext_id), by="id", site=cfg.retailcrm_default_site or None
+                    )
+                except RetailCRMError as exc:
+                    if exc.status_code != 404:
+                        raise
+                else:
+                    retailcrm_order_id = int(legacy_order["order"]["id"])
 
         if retailcrm_order_id is None and komtet_order_id is not None:
             order_filters: dict[str, Any] = {

@@ -118,6 +118,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
   const [deliveryTimeTo, setDeliveryTimeTo] = useState("21:00");
   const [antiLoopSeconds, setAntiLoopSeconds] = useState<number>(15);
   const [customFieldCode, setCustomFieldCode] = useState("komtet_id");
+  const [treatPaidStatusAsPrepaid, setTreatPaidStatusAsPrepaid] = useState(false);
   const [autoSyncEnabled, setAutoSyncEnabled] = useState(true);
   const [requireMarkCode, setRequireMarkCode] = useState(false);
   const [verifyKomtetSignature, setVerifyKomtetSignature] = useState(true);
@@ -171,6 +172,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
     setDeliveryTimeTo(settings.default_delivery_time_to || "21:00");
     setAntiLoopSeconds(settings.anti_loop_seconds ?? 15);
     setCustomFieldCode(settings.komtet_custom_field_code || "komtet_id");
+    setTreatPaidStatusAsPrepaid(settings.treat_paid_status_as_prepaid ?? false);
     setAutoSyncEnabled(settings.auto_sync_enabled ?? true);
     setRequireMarkCode(settings.require_mark_code ?? false);
     setVerifyKomtetSignature(settings.verify_komtet_signature ?? true);
@@ -220,6 +222,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
       require_mark_code: requireMarkCode,
       verify_komtet_signature: verifyKomtetSignature,
       anti_loop_seconds: Number(antiLoopSeconds) || 0,
+      treat_paid_status_as_prepaid: treatPaidStatusAsPrepaid,
       auto_sync_enabled: autoSyncEnabled,
       komtet_custom_field_code: customFieldCode.trim() || "komtet_id",
     };
@@ -713,6 +716,23 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
         </div>
 
         <div className="mt-5 grid grid-cols-1 gap-4 border-t border-slate-100 pt-4 sm:grid-cols-2">
+          <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 hover:bg-slate-100/70">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-slate-900">
+                Считать заказы в статусе «Оплачен» предоплаченными на 100%
+              </div>
+              <div className="text-xs text-slate-500">
+                Если в CRM нет суммы предоплаты и подтверждённых платежей, курьер только оформит чек и не будет брать деньги с клиента.
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={treatPaidStatusAsPrepaid}
+              onChange={(e) => setTreatPaidStatusAsPrepaid(e.target.checked)}
+              className="h-5 w-5 shrink-0 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+            />
+          </label>
+
           <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 hover:bg-slate-100/70">
             <div className="min-w-0">
               <div className="text-sm font-medium text-slate-900">

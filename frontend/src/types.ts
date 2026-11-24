@@ -36,6 +36,7 @@ export interface SettingsResponse {
   require_mark_code: boolean;
   verify_komtet_signature: boolean;
   anti_loop_seconds: number;
+  treat_paid_status_as_prepaid: boolean;
   auto_sync_enabled: boolean;
   komtet_custom_field_code: string;
   items: SettingItem[];
@@ -65,6 +66,7 @@ export interface SettingsUpdateRequest {
   require_mark_code?: boolean;
   verify_komtet_signature?: boolean;
   anti_loop_seconds?: number;
+  treat_paid_status_as_prepaid?: boolean;
   auto_sync_enabled?: boolean;
   komtet_custom_field_code?: string;
 }

@@ -125,6 +125,26 @@ def _sample_mappings() -> MappingLookup:
 # 1. Mapper unit tests
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize(("version", "enabled", "prepaid", "expected"), [
+    ("v2", True, 0, 3160), ("v1", True, 0, 3160),
+    ("v2", False, 0, 0), ("v2", True, 500, 500),
+])
+def test_mapper_paid_status_as_prepayment(version, enabled, prepaid, expected) -> None:
+    order = {
+        "id": 42, "status": "paid", "totalSumm": 3160, "prepaySum": prepaid,
+        "items": [{"id": 10, "initialPrice": 3160, "quantity": 1}],
+        "payments": [{"type": "bank-card", "amount": 3160}],
+    }
+    payload, _ = map_retailcrm_order_to_komtet(
+        order, _sample_config(komtet_api_version=version, treat_paid_status_as_prepaid=enabled),
+        _sample_mappings(),
+    )
+    assert payload["prepayment"] == float(expected)
+    if version == "v2":
+        assert payload["is_pay_to_courier"] is (expected < 3160)
+    else:
+        assert payload["is_paid"] is (expected == 3160)
+
 
 @pytest.mark.parametrize("version", ["v1", "v2"])
 @pytest.mark.parametrize(("order_email", "customer_email", "expected"), [
@@ -2178,6 +2198,7 @@ async def test_admin_audit_logs_settings_and_mappings_redact_secrets(tmp_path: P
             headers={"X-Forwarded-For": "203.0.113.10, 10.0.0.1"},
             json={
                 "auto_sync_enabled": False,
+                "treat_paid_status_as_prepaid": True,
                 "default_vat": "10",
                 "fallback_client_email": " example@example.com ",
                 "trigger_statuses": ["new", "paid"],
@@ -2188,6 +2209,7 @@ async def test_admin_audit_logs_settings_and_mappings_redact_secrets(tmp_path: P
         )
         assert r_set.status_code == 200
         assert r_set.json()["fallback_client_email"] == "example@example.com"
+        assert r_set.json()["treat_paid_status_as_prepaid"] is True
 
         async with session_maker() as db:
             row = await db.scalar(
@@ -2203,6 +2225,7 @@ async def test_admin_audit_logs_settings_and_mappings_redact_secrets(tmp_path: P
             assert row.payload["client_ip"] == "203.0.113.10"
             assert set(row.payload["changed_fields"]) == {
                 "auto_sync_enabled",
+                "treat_paid_status_as_prepaid",
                 "default_vat",
                 "fallback_client_email",
                 "trigger_statuses",
@@ -2212,6 +2235,7 @@ async def test_admin_audit_logs_settings_and_mappings_redact_secrets(tmp_path: P
             }
             assert row.payload["values"] == {
                 "auto_sync_enabled": False,
+                "treat_paid_status_as_prepaid": True,
                 "default_vat": "10",
                 "fallback_client_email": "example@example.com",
                 "trigger_statuses": ["new", "paid"],
@@ -2424,7 +2448,7 @@ async def test_create_order_does_not_retry_after_read_timeout() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", ["mixed", "switch", "refund", "mismatch", "missing", "stale"])
+@pytest.mark.parametrize("scenario", ["mixed", "switch", "refund", "mismatch", "missing", "stale", "paid_status"])
 async def test_done_callback_reconciliation(tmp_path: Path, scenario: str) -> None:
     engine = create_engine(f"sqlite+aiosqlite:///{(tmp_path / 'done.db').as_posix()}")
     await init_db(engine, seed=True, env_settings=_test_env_settings())
@@ -2442,10 +2466,15 @@ async def test_done_callback_reconciliation(tmp_path: Path, scenario: str) -> No
     }
     if scenario == "refund":
         order["payments"] = {"21": {"id": 21, "type": "online", "status": "paid", "amount": 700}}
+    if scenario == "paid_status":
+        order.update(status="paid", prepaySum=0, totalSumm=3160, discountManualAmount=0)
+        order["items"] = [{"id": 10, "quantity": 1, "initialPrice": 3160}]
+        order["payments"] = {"20": {"id": 20, "type": "bank-card", "amount": 3160}}
     payments = {
         "mixed": [{"type": "cash", "sum": 300}, {"type": "card", "sum": 300}],
         "switch": [{"type": "card", "sum": 600}],
         "refund": [{"type": "prepayment", "sum": 600}],
+        "paid_status": [{"type": "prepayment", "sum": 3160}],
         "missing": [],
     }.get(scenario, [{"type": "card", "sum": 600}])
 
@@ -2454,7 +2483,8 @@ async def test_done_callback_reconciliation(tmp_path: Path, scenario: str) -> No
         calls.append((request.method, path))
         if request.method == "GET" and path == "/api/shop/v2/orders/99":
             return httpx.Response(200, json={
-                "id": 99, "state": "done", "items": [{"external_id": "10", "quantity": 1, "total": 600}],
+                "id": 99, "state": "done",
+                "items": [{"external_id": "10", "quantity": 1, "total": order["totalSumm"] if scenario == "paid_status" else 600}],
                 "receipt_info": {"payments": payments},
             })
         if path == "/api/v5/orders/42":
@@ -2487,6 +2517,9 @@ async def test_done_callback_reconciliation(tmp_path: Path, scenario: str) -> No
     async with sessions() as session, httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         row = OrderSync(retailcrm_order_id=42, komtet_order_id=99, komtet_external_id="42")
         session.add(row)
+        if scenario == "paid_status":
+            setting = await session.scalar(select(Setting).where(Setting.key == "treat_paid_status_as_prepaid"))
+            setting.value = "true"
         await session.commit()
         crm = RetailCRMClient("https://example.retailcrm.ru", "key", client=http)
         komtet = KomtetClient("shop", "secret", client=http)
@@ -2526,6 +2559,11 @@ async def test_done_callback_reconciliation(tmp_path: Path, scenario: str) -> No
             await session.commit()
             assert (await sync())["payment_action"] == "none"
             assert len(new_payments) == 1
+        elif scenario == "paid_status":
+            assert result["status"] == "processed"
+            assert row.sync_status == "completed"
+            assert order["status"] == "complete"
+            assert order["payments"]["20"]["status"] == "paid"
         elif scenario == "refund":
             assert result["status"] == row.sync_status == "refund_required"
             assert "100.00" in row.last_error
@@ -2533,6 +2571,7 @@ async def test_done_callback_reconciliation(tmp_path: Path, scenario: str) -> No
             assert result["status"] == row.sync_status == "pending_reconciliation"
         if scenario not in ("mixed", "switch"):
             assert not new_payments
+        if scenario not in ("mixed", "switch", "paid_status"):
             assert order["status"] == "delivering"
 
     await engine.dispose()
@@ -2590,6 +2629,113 @@ async def test_done_callback_reaggregates_marked_units(tmp_path: Path, purchased
         assert [(item["id"], item["quantity"]) for item in order["items"]] == [(473148, purchased_qty)]
         assert order["totalSumm"] == final_total
 
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("state", "scanned", "expected"), [
+    ("new", False, "updated"), ("new", True, "skipped"),
+    ("taken", False, "skipped"), ("done", True, "skipped"),
+])
+async def test_paid_rollout_protects_started_orders(tmp_path: Path, state, scanned, expected) -> None:
+    engine = create_engine(f"sqlite+aiosqlite:///{(tmp_path / 'paid-rollout.db').as_posix()}")
+    await init_db(engine, seed=True, env_settings=_test_env_settings())
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    methods = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v5/orders/42":
+            return httpx.Response(200, json={"success": True, "order": {
+                "id": 42, "status": "paid", "site": "main-site", "totalSumm": 3160,
+                "items": [{"id": 10, "initialPrice": 3160, "quantity": 1}],
+            }})
+        assert request.url.path == "/api/shop/v2/orders/99"
+        methods.append(request.method)
+        if request.method == "PUT":
+            payload = json.loads(request.content)
+            assert "state" not in payload
+            assert payload["prepayment"] == 3160
+            assert payload["is_pay_to_courier"] is False
+        return httpx.Response(200, json={
+            "id": 99, "state": state, "items": [{"mark_code": "scanned"}] if scanned else [],
+        })
+
+    async with sessions.begin() as db:
+        db.add(OrderSync(retailcrm_order_id=42, komtet_order_id=99, komtet_state="new"))
+        setting = await db.scalar(select(Setting).where(Setting.key == "treat_paid_status_as_prepaid"))
+        setting.value = "true"
+    async with sessions() as db, httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await sync_retailcrm_to_komtet(
+            db, 42, only_if_new=True,
+            crm_client=RetailCRMClient("https://example.retailcrm.ru", "key", client=http),
+            komtet_client=KomtetClient("shop", "secret", client=http),
+        )
+    assert result["status"] == expected
+    assert methods == (["GET", "PUT"] if expected == "updated" else ["GET"])
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_backfills_only_unlinked_assigned_orders(tmp_path: Path, monkeypatch) -> None:
+    now = datetime(2026, 11, 23, 22, tzinfo=timezone.utc)
+    monkeypatch.setattr("app.services.sync_service._utc_now", lambda: now)
+    engine = create_engine(f"sqlite+aiosqlite:///{(tmp_path / 'backfill.db').as_posix()}")
+    await init_db(engine, seed=True, env_settings=_test_env_settings())
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    order = {
+        "id": 42, "status": "new", "site": "main-site",
+        "delivery": {"date": "2026-11-24", "code": "courier", "data": {"courierId": 4}},
+        "items": [{"id": 10, "initialPrice": 100, "quantity": 1, "productName": "Корм"}],
+    }
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        calls.append((request.method, path))
+        if path == "/api/v5/orders":
+            assert request.url.params["limit"] == "50"
+            assert request.url.params["filter[deliveryDateFrom]"] == "2026-11-24"
+            assert request.url.params["filter[deliveryDateTo]"] == "2026-11-25"
+            assert request.url.params["filter[sites][]"] == "main-site"
+            assert request.url.params["filter[deliveryTypes][]"] == "courier"
+            assert "paid" in request.url.params.get_list("filter[extendedStatus][]")
+            first_page = [
+                {**order, "id": 43, "delivery": {**order["delivery"], "data": {}}},
+                {**order, "id": 44},
+                {**order, "id": 45, "customFields": {"komtet_id": 200}},
+            ]
+            orders = first_page if request.url.params["page"] == "1" else [order]
+            return httpx.Response(200, json={
+                "success": True, "orders": orders, "pagination": {"totalPageCount": 2},
+            })
+        if path == "/api/v5/orders/42":
+            return httpx.Response(200, json={"success": True, "order": order})
+        if path == "/api/shop/v2/orders":
+            assert json.loads(request.content)["courier_id"] == 701
+            return httpx.Response(201, json={"id": 99, "state": "new"})
+        if path == "/api/v5/orders/42/edit":
+            return httpx.Response(200, json={"success": True})
+        pytest.fail(f"Unexpected endpoint {path}")
+
+    async with sessions.begin() as db:
+        db.add(Mapping(mapping_type="courier", retailcrm_code="4", komtet_code="701"))
+        db.add(OrderSync(retailcrm_order_id=44))
+        setting = await db.scalar(select(Setting).where(Setting.key == "allowed_delivery_codes"))
+        setting.value = '["courier"]'
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        crm = RetailCRMClient("https://example.retailcrm.ru", "key", client=http)
+        komtet = KomtetClient("shop", "secret", client=http)
+        await run_reconciliation_cycle(sessions, crm_client=crm, komtet_client=komtet)
+    assert calls == [
+        ("GET", "/api/v5/orders"), ("GET", "/api/v5/orders"), ("GET", "/api/v5/orders/42"),
+        ("POST", "/api/shop/v2/orders"), ("POST", "/api/v5/orders/42/edit"),
+    ]
+    async with sessions() as db:
+        row = await db.scalar(select(OrderSync).where(OrderSync.retailcrm_order_id == 42))
+        assert row.komtet_order_id == 99
+        log = await db.scalar(select(SyncLog).where(SyncLog.event_type == "order_create"))
+        assert log.payload["trigger_event"] == "auto_backfill"
     await engine.dispose()
 
 

@@ -25,6 +25,7 @@ from app.config import Settings, get_app_timezone
 from app.models import OrderSync, SyncLog
 from app.services.mapper import (
     _allocate_money,
+    _extract_courier_id,
     _extract_item_raw_total,
     map_retailcrm_order_to_komtet,
 )
@@ -564,8 +565,9 @@ async def sync_retailcrm_to_komtet(
     crm_client: Optional[RetailCRMClient] = None,
     komtet_client: Optional[KomtetClient] = None,
     reconciliation_retry: bool = False,
+    only_if_new: bool = False,
 ) -> dict[str, Any]:
-    """Synchronize a single RetailCRM order to KOMTET Kassa (create, update, or cancel)."""
+    """Synchronize an order, or refresh a linked, unstarted paid order with only_if_new."""
     async with _order_lock(order_id):
         return await _sync_retailcrm_to_komtet_locked(
             session,
@@ -577,6 +579,7 @@ async def sync_retailcrm_to_komtet(
             crm_client=crm_client,
             komtet_client=komtet_client,
             reconciliation_retry=reconciliation_retry,
+            only_if_new=only_if_new,
         )
 
 
@@ -716,6 +719,7 @@ async def _sync_retailcrm_to_komtet_locked(
     crm_client: Optional[RetailCRMClient] = None,
     komtet_client: Optional[KomtetClient] = None,
     reconciliation_retry: bool = False,
+    only_if_new: bool = False,
 ) -> dict[str, Any]:
     cfg = await load_runtime_config(session)
     mappings = await load_active_mappings(session)
@@ -746,6 +750,10 @@ async def _sync_retailcrm_to_komtet_locked(
     )
 
     now = _utc_now()
+    if trigger_event == "auto_backfill" and order_sync is not None:
+        return {"status": "skipped", "reason": "already_linked"}
+    if only_if_new and (order_sync is None or order_sync.komtet_order_id is None):
+        return {"status": "skipped", "reason": "missing_link"}
     if reconciliation_retry and (
         order_sync is None
         or order_sync.sync_status != "error"
@@ -823,6 +831,13 @@ async def _sync_retailcrm_to_komtet_locked(
         delivery_log = delivery_code or "-"
         order_number = str(order.get("number") or "").strip()
         crm_komtet_id = _extract_komtet_id_from_order(order, cfg.komtet_custom_field_code)
+
+        if trigger_event == "auto_backfill" and not _eligible_for_backfill(order, cfg, mappings, now):
+            return {"status": "skipped", "reason": "no_longer_eligible"}
+        if only_if_new and (
+            status != "paid" or status in cfg.cancel_statuses or not cfg.treat_paid_status_as_prepaid
+        ):
+            return {"status": "skipped", "reason": "no_longer_eligible"}
 
         if order_sync is None:
             order_sync = OrderSync(
@@ -1295,6 +1310,8 @@ async def _sync_retailcrm_to_komtet_locked(
                 result["warning"] = warning
             return result
 
+        if komtet_id is None and only_if_new:
+            return {"status": "skipped", "reason": "missing_link"}
         if komtet_id is None:
             return await _create_in_komtet("new order" if not link_note else "stale link")
 
@@ -1329,11 +1346,28 @@ async def _sync_retailcrm_to_komtet_locked(
 
         # Never send `state` on update: it would reset the courier workflow state in KOMTET.
         update_payload = {k: v for k, v in komtet_payload.items() if k != "state"}
+        protect_update = only_if_new or (cfg.treat_paid_status_as_prepaid and status == "paid")
+        if only_if_new and (
+            cfg.komtet_api_version != "v2"
+            or not update_payload["prepayment"]
+            or update_payload["is_pay_to_courier"]
+        ):
+            return {"status": "skipped", "reason": "no_longer_eligible"}
         try:
-            updated = await komtet.update_order(komtet_id, update_payload)
+            if protect_update:
+                detail = await komtet.get_order(komtet_id)
+                if (
+                    str(detail.get("id")) != str(komtet_id)
+                    or detail.get("state") != "new"
+                    or any(item.get("mark_code") for item in detail.get("items") or [])
+                ):
+                    return {"status": "skipped", "reason": "protected_order", "state": detail.get("state")}
+            updated = await komtet.update_order(komtet_id, update_payload, retry=not protect_update)
         except KomtetError as exc:
             if exc.status_code != 404:
                 raise
+            if protect_update:
+                return {"status": "skipped", "reason": "missing_remote_order"}
             logger.warning(
                 "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=recreate "
                 "komtet_id=%s reason=komtet_order_missing",
@@ -1976,12 +2010,34 @@ async def _process_komtet_callback_locked(
         _ZERO,
     )
     already_paid = max(paid_sum, _to_decimal(crm_order.get("prepaySum")))
+    status_confirms_prepayment = (
+        cfg.treat_paid_status_as_prepaid
+        and crm_order.get("status") == "paid"
+        and already_paid == 0
+        and credited > 0
+        and courier_total == 0
+    )
     paid_before_courier = already_paid - already_recorded
     overpaid = max(_ZERO, paid_before_courier + courier_total - final_total)
-    if paid_before_courier + _PENNY < min(credited, final_total):
+    if not status_confirms_prepayment and paid_before_courier + _PENNY < min(credited, final_total):
         return await pending("RetailCRM does not confirm the prepayment credited by KOMTET")
 
     actions: list[str] = []
+    if status_confirms_prepayment:
+        matching_payments = [
+            p for p in existing_payments
+            if p.get("id") is not None
+            and str(p.get("status") or "").strip() in _SETTLEABLE_PAYMENT_STATUSES
+            and _to_decimal(p.get("amount")) == credited
+        ]
+        if len(matching_payments) == 1:
+            try:
+                await crm.update_payment(matching_payments[0]["id"], {"status": "paid"}, by="id", site=site)
+                actions.append("updated")
+            except RetailCRMError as exc:
+                if exc.status_code not in (400, 422):
+                    raise
+                logger.warning("RetailCRM rejected confirming prepayment for order %s", retailcrm_order_id)
     if not overpaid and courier_total > already_recorded:
         planned_types = {payment_type for payment_type, _ in payment_plan.values()}
         for payment in existing_payments:
@@ -2098,6 +2154,69 @@ async def _process_komtet_callback_locked(
 # ---------------------------------------------------------------------------
 
 
+def _eligible_for_backfill(
+    order: dict[str, Any], cfg: RuntimeConfig, mappings: MappingLookup, now: datetime,
+) -> bool:
+    today = now.astimezone(get_app_timezone(cfg.app_timezone)).date()
+    delivery = order.get("delivery") or {}
+    custom_fields = order.get("customFields") or {}
+    return (
+        order.get("status") in cfg.trigger_statuses
+        and not (cfg.retailcrm_default_site and order.get("site") != cfg.retailcrm_default_site)
+        and delivery.get("date") in (today.isoformat(), (today + timedelta(days=1)).isoformat())
+        and (not cfg.allowed_delivery_codes or delivery.get("code") in cfg.allowed_delivery_codes)
+        and _extract_courier_id(order) in mappings.couriers_crm_to_komtet
+        and not custom_fields.get(cfg.komtet_custom_field_code)
+    )
+
+
+async def _backfill_courier_orders(
+    sessions: async_sessionmaker[AsyncSession],
+    cfg: RuntimeConfig,
+    mappings: MappingLookup,
+    now: datetime,
+    crm: RetailCRMClient,
+    komtet_client: Optional[KomtetClient],
+) -> None:
+    today = now.astimezone(get_app_timezone(cfg.app_timezone)).date()
+    filters = {
+        "deliveryDateFrom": today.isoformat(),
+        "deliveryDateTo": (today + timedelta(days=1)).isoformat(),
+        "extendedStatus": cfg.trigger_statuses,
+    }
+    if cfg.retailcrm_default_site:
+        filters["sites"] = [cfg.retailcrm_default_site]
+    if cfg.allowed_delivery_codes:
+        filters["deliveryTypes"] = cfg.allowed_delivery_codes
+
+    page = 1
+    while True:
+        response = await crm.get_orders(filters=filters, limit=50, page=page)
+        candidates = {
+            int(order["id"]): order for order in response.get("orders", [])
+            if _eligible_for_backfill(order, cfg, mappings, now)
+        }
+        if candidates:
+            async with sessions() as session:
+                linked_ids = set(await session.scalars(
+                    select(OrderSync.retailcrm_order_id).where(OrderSync.retailcrm_order_id.in_(candidates))
+                ))
+            for order_id, order in candidates.items():
+                if order_id in linked_ids:
+                    continue
+                try:
+                    async with sessions() as session:
+                        await sync_retailcrm_to_komtet(
+                            session, order_id, trigger_event="auto_backfill", site=order.get("site"),
+                            crm_client=crm, komtet_client=komtet_client,
+                        )
+                except Exception:
+                    logger.exception("Reconciliation could not backfill RetailCRM order %s", order_id)
+        if page >= (response.get("pagination") or {}).get("totalPageCount", 1):
+            return
+        page += 1
+
+
 async def run_reconciliation_cycle(
     sessions: async_sessionmaker[AsyncSession],
     *,
@@ -2123,6 +2242,7 @@ async def run_reconciliation_cycle(
         if not cfg.auto_sync_enabled:
             logger.info("Reconciliation cycle skipped: auto sync is disabled")
             return after_ids
+        mappings = await load_active_mappings(session)
         polls = (await session.execute(
             select(OrderSync.id, OrderSync.retailcrm_order_id)
             .where(*poll_candidates)
@@ -2199,6 +2319,16 @@ async def run_reconciliation_cycle(
                 )
         except Exception:
             logger.exception("Reconciliation could not retry RetailCRM order %s", order_id)
+
+    if mappings.couriers_crm_to_komtet and cfg.trigger_statuses:
+        crm = crm_client or build_retailcrm_client(cfg)
+        try:
+            await _backfill_courier_orders(sessions, cfg, mappings, now, crm, komtet_client)
+        except Exception:
+            logger.exception("Reconciliation could not list RetailCRM orders for backfill")
+        finally:
+            if crm_client is None:
+                await crm.close()
 
     logger.info("Reconciliation cycle finished (status checks=%d, retry candidates=%d)", len(polls), len(retries))
     return retry_after_id, poll_after_id

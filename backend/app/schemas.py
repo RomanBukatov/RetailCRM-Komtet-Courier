@@ -61,6 +61,7 @@ class SettingsResponse(BaseModel):
     require_mark_code: bool = False
     verify_komtet_signature: bool = True
     anti_loop_seconds: int = 15
+    treat_paid_status_as_prepaid: bool = False
     auto_sync_enabled: bool = True
     komtet_custom_field_code: str = "komtet_id"
     items: list[SettingItemSchema] = Field(default_factory=list)
@@ -92,6 +93,7 @@ class SettingsUpdateRequest(BaseModel):
     require_mark_code: Optional[bool] = None
     verify_komtet_signature: Optional[bool] = None
     anti_loop_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
+    treat_paid_status_as_prepaid: Optional[bool] = None
     auto_sync_enabled: Optional[bool] = None
     komtet_custom_field_code: Optional[str] = None
 

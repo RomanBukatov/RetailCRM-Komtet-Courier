@@ -50,6 +50,7 @@ class RuntimeConfig:
     allowed_delivery_codes: list[str] = field(default_factory=list)
     require_mark_code: bool = False
     fallback_client_email: str = ""
+    treat_paid_status_as_prepaid: bool = False
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,9 @@ SETTING_DEFINITIONS: dict[str, tuple[str, bool, str, Any]] = {
     "require_mark_code": ("bool", False, "Запрашивать сканирование маркировки", False),
     "verify_komtet_signature": ("bool", False, "Проверять X-HMAC-Signature от КОМТЕТ", True),
     "anti_loop_seconds": ("int", False, "Окно защиты от петли после callback (сек)", 15),
+    "treat_paid_status_as_prepaid": (
+        "bool", False, "Считать заказы в статусе «Оплачен» предоплаченными на 100%", False,
+    ),
     "auto_sync_enabled": ("bool", False, "Автоматическая синхронизация заказов и статусов", True),
     "komtet_custom_field_code": ("string", False, "Код доп. поля ID заказа КОМТЕТ в RetailCRM", "komtet_id"),
 }
@@ -317,6 +321,7 @@ async def load_runtime_config(
         require_mark_code=bool(get_val("require_mark_code")),
         verify_komtet_signature=bool(get_val("verify_komtet_signature")),
         anti_loop_seconds=int(get_val("anti_loop_seconds")),
+        treat_paid_status_as_prepaid=bool(get_val("treat_paid_status_as_prepaid")),
         auto_sync_enabled=bool(get_val("auto_sync_enabled")),
         komtet_custom_field_code=str(get_val("komtet_custom_field_code")) or "komtet_id",
         app_timezone=env.app_timezone,
@@ -378,6 +383,7 @@ async def get_settings_response(
         require_mark_code=cfg.require_mark_code,
         verify_komtet_signature=cfg.verify_komtet_signature,
         anti_loop_seconds=cfg.anti_loop_seconds,
+        treat_paid_status_as_prepaid=cfg.treat_paid_status_as_prepaid,
         auto_sync_enabled=cfg.auto_sync_enabled,
         komtet_custom_field_code=cfg.komtet_custom_field_code,
         items=items,

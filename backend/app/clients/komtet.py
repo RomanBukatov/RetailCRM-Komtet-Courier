@@ -169,6 +169,7 @@ class KomtetClient:
         *,
         params: Optional[dict[str, Any]] = None,
         json_data: Any = None,
+        retry: bool = True,
     ) -> Any:
         upper_method = method.upper()
         clean_path = "/" + full_api_path.lstrip("/")
@@ -210,7 +211,7 @@ class KomtetClient:
         follow_redirects = upper_method == "GET"
 
         response: Optional[httpx.Response] = None
-        total_retries = len(self._retry_delays)
+        total_retries = len(self._retry_delays) if retry else 0
         max_attempts = total_retries + 1
         started_at = time.perf_counter()
 
@@ -340,6 +341,7 @@ class KomtetClient:
         params: Optional[dict[str, Any]] = None,
         json_data: Any = None,
         api_version: Optional[ApiVersion] = None,
+        retry: bool = True,
     ) -> Any:
         version = api_version or self._api_version
         full_path = f"/api/shop/{version}/{resource_path.lstrip('/')}"
@@ -348,6 +350,7 @@ class KomtetClient:
             full_path,
             params=params,
             json_data=json_data,
+            retry=retry,
         )
 
     # ------------------------------------------------------------------
@@ -502,6 +505,7 @@ class KomtetClient:
         order_payload: dict[str, Any],
         *,
         api_version: Optional[ApiVersion] = None,
+        retry: bool = True,
     ) -> dict[str, Any]:
         """Update an existing delivery order (`PUT /api/shop/{v}/orders/{order_id}`)."""
         result = await self._request(
@@ -509,6 +513,7 @@ class KomtetClient:
             f"orders/{quote(str(order_id), safe='')}",
             json_data=order_payload,
             api_version=api_version,
+            retry=retry,
         )
         return result if isinstance(result, dict) else {"raw": result}
 

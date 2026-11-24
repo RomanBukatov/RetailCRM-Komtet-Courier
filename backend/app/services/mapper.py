@@ -607,6 +607,8 @@ def map_retailcrm_order_to_komtet(
     )
     prepay_sum = _quantize_money(_to_decimal(order.get("prepaySum", 0)))
     paid_sum = max(paid_payments_sum, prepay_sum)
+    if config.treat_paid_status_as_prepaid and order.get("status") == "paid" and paid_sum == 0:
+        paid_sum = order_total
 
     prepayment = min(paid_sum, order_total) if order_total > Decimal("0.00") else Decimal("0.00")
     is_fully_paid = order_total > Decimal("0.00") and prepayment >= order_total

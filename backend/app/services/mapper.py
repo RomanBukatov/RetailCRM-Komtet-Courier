@@ -408,7 +408,7 @@ def _split_item_for_exact_total(
             return entry
 
         # In KOMTET API v2 `id` is KOMTET's internal position ID; only pass RetailCRM's
-        # item identifier in `external_id` (`"<id>"`, `"<id>_split"`, or `"delivery"`).
+        # item identifier in `external_id`, with a suffix when a line is split.
         return {
             "external_id": str(entry_id),
             "name": name,
@@ -426,6 +426,17 @@ def _split_item_for_exact_total(
 
     is_integer_qty = quantity == quantity.to_integral_value()
     if is_integer_qty and quantity > Decimal("1"):
+        if api_version == "v2" and item_type == "product" and require_mark_code:
+            if quantity > 500:
+                raise ValueError(f"Marked item {item_id} exceeds the 500-unit limit")
+            int_qty = int(quantity)
+            unit_cents, remainder = divmod(int(target_total * 100), int_qty)
+            unit_entries = []
+            for index in range(1, int_qty + 1):
+                unit_price = Decimal(unit_cents + (index <= remainder)) * _PENNY
+                unit_entries.append(build_entry(f"{item_id}_m{index}", unit_price, 1, unit_price))
+            return unit_entries
+
         int_qty = int(quantity)
         floor_unit = (target_total / quantity).quantize(_PENNY, rounding=ROUND_DOWN)
         remainder_cents = int(

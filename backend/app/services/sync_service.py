@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -243,9 +244,7 @@ def _extract_crm_payments(order: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _strip_split_suffix(raw_id: Any) -> str:
     text = str(raw_id if raw_id is not None else "").strip()
-    if text.endswith("_split"):
-        return text[: -len("_split")]
-    return text
+    return re.sub(r"(?:_split|_m\d+)$", "", text)
 
 
 def _crm_item_name(crm_item: dict[str, Any]) -> str:
@@ -281,8 +280,8 @@ def _reconcile_partial_redemption(
 
     Matching rules (strict, to never corrupt the RetailCRM order composition):
       1. A callback line is matched strictly by its RetailCRM identifier (`external_id`
-         or `order_item_id`, with the `_split` suffix stripped so penny-split rows are
-         re-aggregated). KOMTET's internal `cb_item["id"]` is NEVER matched against CRM IDs.
+         or `order_item_id`, with split suffixes stripped to re-aggregate rows).
+         KOMTET's internal `cb_item["id"]` is NEVER matched against CRM IDs.
       2. Lines without `external_id`/`order_item_id` fall back to normalized name matching;
          name buckets are *consumed* (capped by the CRM quantity).
       3. Any callback goods line that cannot be matched aborts reconciliation with ValueError.

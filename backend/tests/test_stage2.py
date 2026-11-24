@@ -193,6 +193,40 @@ def test_mapper_phone_address_delivery_window_and_vat() -> None:
     assert map_vat_rate(None, vat_map, default_vat="22") == "22"
 
 
+@pytest.mark.parametrize(
+    ("marked", "order_sum", "expected"),
+    [
+        (True, 1350, [("473148_m1", 1, 450, 450), ("473148_m2", 1, 450, 450),
+                      ("473148_m3", 1, 450, 450)]),
+        (True, 100, [("473148_m1", 1, 33.34, 33.34), ("473148_m2", 1, 33.33, 33.33),
+                     ("473148_m3", 1, 33.33, 33.33)]),
+        (False, 1350, [("473148", 3, 450, 1350)]),
+    ],
+)
+def test_mapper_v2_marked_units(marked, order_sum, expected) -> None:
+    order = {
+        "id": 315568,
+        "summ": order_sum,
+        "items": [{"id": 473148, "quantity": 3, "initialPrice": 450}],
+    }
+    config = _sample_config(komtet_api_version="v2", require_mark_code=marked)
+    payload, _ = map_retailcrm_order_to_komtet(order, config, _sample_mappings())
+    items = payload["items"]
+    assert [
+        (item["external_id"], item["quantity"], item["price"], item["total"])
+        for item in items
+    ] == expected
+    assert all(item["is_need_mark_code"] is marked for item in items)
+    assert sum(Decimal(str(item["total"])) for item in items) == Decimal(order_sum)
+
+
+def test_mapper_rejects_marked_quantity_above_limit() -> None:
+    order = {"id": 315568, "items": [{"id": 473148, "quantity": 501, "initialPrice": 450}]}
+    config = _sample_config(komtet_api_version="v2", require_mark_code=True)
+    with pytest.raises(ValueError, match="473148 exceeds the 500-unit limit"):
+        map_retailcrm_order_to_komtet(order, config, _sample_mappings())
+
+
 @pytest.mark.parametrize("require_mark_code", [False, True])
 def test_mapper_discounts_penny_exact_split_delivery_and_prepayment(require_mark_code: bool) -> None:
     """Order discount creating odd cents per unit must split into exact price*quantity==total lines."""
@@ -247,8 +281,7 @@ def test_mapper_discounts_penny_exact_split_delivery_and_prepayment(require_mark
     assert len(payload_hash) == 64
 
     items = payload["items"]
-    # Product split into 2 lines (1 * 96.66 + 2 * 96.67 = 290.00) + 1 delivery service line (350.00)
-    assert len(items) == 3
+    assert len(items) == (4 if require_mark_code else 3)
     for item in items:
         assert Decimal(str(item["price"])) * Decimal(str(item["quantity"])) == Decimal(
             str(item["total"])
@@ -257,7 +290,8 @@ def test_mapper_discounts_penny_exact_split_delivery_and_prepayment(require_mark
     product_lines = [i for i in items if i["type"] == "product"]
     assert sum(Decimal(str(i["total"])) for i in product_lines) == Decimal("290.00")
     assert all(i["vat"] == "10" for i in product_lines)
-    assert [i["external_id"] for i in product_lines] == ["91", "91_split"]
+    expected_ids = ["91_m1", "91_m2", "91_m3"] if require_mark_code else ["91", "91_split"]
+    assert [i["external_id"] for i in product_lines] == expected_ids
     assert all("id" not in i for i in items)
 
     delivery_lines = [i for i in items if i["type"] == "service"]
@@ -2502,6 +2536,62 @@ async def test_done_callback_reconciliation(tmp_path: Path, scenario: str) -> No
             assert order["status"] == "delivering"
 
     await engine.dispose()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("purchased_qty", [2, 3])
+async def test_done_callback_reaggregates_marked_units(tmp_path: Path, purchased_qty: int) -> None:
+    engine = create_engine(f"sqlite+aiosqlite:///{(tmp_path / 'marked.db').as_posix()}")
+    await init_db(engine, seed=True, env_settings=_test_env_settings())
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    final_total = 450 * purchased_qty
+    order = {
+        "id": 315568, "site": "main-site", "status": "complete", "totalSumm": 1350,
+        "items": [{"id": 473148, "quantity": 3, "initialPrice": 450, "offer": {"id": 1}}],
+        "payments": {"20": {
+            "id": 20, "externalId": "komtet-99-card", "type": "bank-card",
+            "status": "paid", "amount": final_total,
+        }},
+    }
+    edits = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/api/shop/v2/orders/99":
+            return httpx.Response(200, json={
+                "id": 99, "state": "done",
+                "items": [
+                    {"external_id": f"473148_m{index}", "quantity": 1, "price": 450, "total": 450}
+                    for index in range(1, purchased_qty + 1)
+                ],
+                "receipt_info": {"payments": [{"type": "card", "sum": final_total}]},
+            })
+        if request.method == "GET" and path == "/api/v5/orders/315568":
+            return httpx.Response(200, json={"success": True, "order": order})
+        if request.method == "POST" and path == "/api/v5/orders/315568/edit":
+            patch = json.loads(parse_qs(request.content.decode())["order"][0])
+            edits.append(patch)
+            order["items"] = patch["items"]
+            order["totalSumm"] = sum(item["initialPrice"] * item["quantity"] for item in patch["items"])
+            return httpx.Response(200, json={"success": True})
+        pytest.fail(f"Unexpected endpoint {request.method} {path}")
+
+    async with sessions() as session, httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        session.add(OrderSync(retailcrm_order_id=315568, komtet_order_id=99, komtet_external_id="304543"))
+        await session.commit()
+        result = await sync_komtet_to_retailcrm(
+            session, {"id": 99, "external_id": "304543", "state": "done"},
+            crm_client=RetailCRMClient("https://example.retailcrm.ru", "key", client=http),
+            komtet_client=KomtetClient("shop", "secret", client=http),
+            signature_already_verified=True,
+        )
+        assert result["status"] == "processed"
+        assert result["items_changed"] is (purchased_qty == 2)
+        assert len(edits) == 3 - purchased_qty
+        assert [(item["id"], item["quantity"]) for item in order["items"]] == [(473148, purchased_qty)]
+        assert order["totalSumm"] == final_total
+
+    await engine.dispose()
+
 
 @pytest.mark.asyncio
 async def test_reconciliation_retries_recent_failed_order(tmp_path: Path) -> None:

@@ -19,6 +19,8 @@ VALID_KOMTET_ORDER_PAYMENT_TYPES = frozenset({"card", "cash"})
 
 _TIME_RANGE_RE = re.compile(r"(\d{1,2}:\d{2})\D+(\d{1,2}:\d{2})")
 _HHMM_RE = re.compile(r"^(\d{1,2}):(\d{2})(?::\d{2})?$")
+_EMAIL_LOCAL_PART_RE = re.compile(r"[\w!#$%&'*+/=?^`{|}~\-]+(?:\.[\w!#$%&'*+/=?^`{|}~\-]+)*")
+_EMAIL_DOMAIN_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", re.IGNORECASE | re.ASCII)
 _PENNY = Decimal("0.01")
 
 
@@ -102,12 +104,21 @@ def extract_client_name(order: dict[str, Any]) -> str:
 
 def extract_client_email(order: dict[str, Any]) -> str:
     """Extract recipient email from RetailCRM order or customer."""
-    email = str(order.get("email") or "").strip()
-    if email:
-        return email
     customer = order.get("customer")
-    if isinstance(customer, dict):
-        return str(customer.get("email") or "").strip()
+    for candidate in (order.get("email"), customer.get("email") if isinstance(customer, dict) else None):
+        if not isinstance(candidate, str):
+            continue
+        email = candidate.strip()
+        local, _, domain = email.partition("@")
+        if not _EMAIL_LOCAL_PART_RE.fullmatch(local):
+            continue
+        try:
+            ascii_domain = domain.encode("idna").decode("ascii")
+        except UnicodeError:
+            continue
+        labels = ascii_domain.split(".")
+        if len(labels) > 1 and all(_EMAIL_DOMAIN_RE.fullmatch(label) for label in labels):
+            return email
     return ""
 
 
@@ -633,7 +644,7 @@ def map_retailcrm_order_to_komtet(
     client_address = build_delivery_address(order) or "Адрес не указан"
     client_phone = extract_client_phone(order)
     client_name = extract_client_name(order)
-    client_email = extract_client_email(order)
+    client_email = extract_client_email(order) or config.fallback_client_email.strip()
 
     comment_parts = [
         str(order.get("customerComment") or "").strip(),

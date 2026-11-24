@@ -73,6 +73,7 @@ const VALIDATION_FIELD_LABELS: Record<string, string> = {
   tax_system: "Система налогообложения (СНО)",
   default_vat: "Ставка НДС по умолчанию",
   payment_address: "Место расчётов",
+  fallback_client_email: "Резервный email покупателя",
   company_inn: "ИНН организации / ИП",
   trigger_statuses: "Статусы для отправки заказа",
   cancel_statuses: "Статусы отмены заказа",

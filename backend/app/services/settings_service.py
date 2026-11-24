@@ -49,6 +49,7 @@ class RuntimeConfig:
     app_timezone: str = "Europe/Moscow"
     allowed_delivery_codes: list[str] = field(default_factory=list)
     require_mark_code: bool = False
+    fallback_client_email: str = ""
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ SETTING_DEFINITIONS: dict[str, tuple[str, bool, str, Any]] = {
     "tax_system": ("int", False, "Система налогообложения (0=ОСНО, 1=УСН д, 2=УСН д-р, 4=ЕСХН, 5=Патент)", 0),
     "default_vat": ("string", False, "Ставка НДС по умолчанию для КОМТЕТ", "22"),
     "payment_address": ("string", False, "Платёжный адрес (сайт магазина)", ""),
+    "fallback_client_email": ("string", False, "Резервный email покупателя", ""),
     "company_inn": ("string", False, "ИНН организации/ИП", ""),
     "trigger_statuses": ("json", False, "Статусы RetailCRM для отправки в КОМТЕТ", DEFAULT_TRIGGER_STATUSES),
     "cancel_statuses": ("json", False, "Статусы отмены RetailCRM", DEFAULT_CANCEL_STATUSES),
@@ -101,7 +103,7 @@ SETTING_DEFINITIONS: dict[str, tuple[str, bool, str, Any]] = {
     "require_mark_code": ("bool", False, "Запрашивать сканирование маркировки", False),
     "verify_komtet_signature": ("bool", False, "Проверять X-HMAC-Signature от КОМТЕТ", True),
     "anti_loop_seconds": ("int", False, "Окно защиты от петли после callback (сек)", 15),
-    "auto_sync_enabled": ("bool", False, "Автоматическая синхронизация по вебхукам", True),
+    "auto_sync_enabled": ("bool", False, "Автоматическая синхронизация заказов и статусов", True),
     "komtet_custom_field_code": ("string", False, "Код доп. поля ID заказа КОМТЕТ в RetailCRM", "komtet_id"),
 }
 
@@ -302,6 +304,7 @@ async def load_runtime_config(
         tax_system=int(get_val("tax_system")),
         default_vat=str(get_val("default_vat")),
         payment_address=str(get_val("payment_address")),
+        fallback_client_email=str(get_val("fallback_client_email")),
         company_inn=str(get_val("company_inn")),
         trigger_statuses=[str(s).strip() for s in trigger_statuses if str(s).strip()],
         cancel_statuses=[str(s).strip() for s in cancel_statuses if str(s).strip()],
@@ -363,6 +366,7 @@ async def get_settings_response(
         tax_system=cfg.tax_system,
         default_vat=cfg.default_vat,
         payment_address=cfg.payment_address,
+        fallback_client_email=cfg.fallback_client_email,
         company_inn=cfg.company_inn,
         trigger_statuses=cfg.trigger_statuses,
         cancel_statuses=cfg.cancel_statuses,
@@ -416,6 +420,8 @@ async def update_settings(
                 raise ValueError("komtet_queue_id must be a positive integer or null")
         elif new_val is None:
             continue
+        elif key == "fallback_client_email":
+            new_val = new_val.strip()
         elif key in {"retailcrm_url", "komtet_base_url", "komtet_callback_url"}:
             new_val = validate_outbound_url(
                 str(new_val),

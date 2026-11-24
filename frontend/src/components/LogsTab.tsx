@@ -46,6 +46,7 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
   sync_error: "Ошибка синхронизации",
   signature_invalid: "Неверная подпись уведомления",
   callback_processed: "Чек пробит (обновлено в CRM)",
+  order_status_polled: "Статус получен при автоматической проверке КОМТЕТ",
   callback_state_update: "Обновление статуса из КОМТЕТ",
   callback_duplicate_skipped: "Повторное уведомление",
   callback_order_not_found: "Заказ из уведомления не найден",

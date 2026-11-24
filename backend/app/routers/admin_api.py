@@ -114,6 +114,7 @@ async def save_settings(
             changed_fields.append(key)
             changed_values[key] = "[UPDATED]"
         else:
+            # Compare resolved values, including normalized settings such as the fallback email.
             before_val = getattr(before_cfg, key)
             after_val = getattr(after_cfg, key)
             if before_val != after_val:

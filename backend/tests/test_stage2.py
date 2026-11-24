@@ -43,6 +43,7 @@ from app.services.settings_service import (  # noqa: E402
 )
 from app.services.sync_service import (  # noqa: E402
     _reconcile_partial_redemption,
+    run_reconciliation_cycle,
     sync_komtet_to_retailcrm,
     sync_retailcrm_to_komtet,
 )
@@ -123,6 +124,23 @@ def _sample_mappings() -> MappingLookup:
 # ---------------------------------------------------------------------------
 # 1. Mapper unit tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize(("order_email", "customer_email", "expected"), [
+    ("", " ", "example@example.com"),
+    ("invalid", "invalid@domain", "example@example.com"),
+    ("invalid", " buyer@example.org ", "buyer@example.org"),
+    ("order@example.org", "buyer@example.org", "order@example.org"),
+])
+def test_mapper_fallback_client_email(version, order_email, customer_email, expected) -> None:
+    order = {
+        "id": 42, "email": order_email, "customer": {"email": customer_email},
+        "items": [{"id": 10, "initialPrice": 100, "quantity": 1, "productName": "Корм"}],
+    }
+    cfg = _sample_config(komtet_api_version=version, fallback_client_email=" example@example.com ")
+    payload, _ = map_retailcrm_order_to_komtet(order, cfg, _sample_mappings())
+    assert (payload["client_email"] if version == "v1" else payload["client"]["email"]) == expected
 
 
 def test_mapper_phone_address_delivery_window_and_vat() -> None:
@@ -2127,6 +2145,7 @@ async def test_admin_audit_logs_settings_and_mappings_redact_secrets(tmp_path: P
             json={
                 "auto_sync_enabled": False,
                 "default_vat": "10",
+                "fallback_client_email": " example@example.com ",
                 "trigger_statuses": ["new", "paid"],
                 "allowed_delivery_codes": ["courier"],
                 "retailcrm_api_key": "super-secret-crm-value-7777",
@@ -2134,6 +2153,7 @@ async def test_admin_audit_logs_settings_and_mappings_redact_secrets(tmp_path: P
             },
         )
         assert r_set.status_code == 200
+        assert r_set.json()["fallback_client_email"] == "example@example.com"
 
         async with session_maker() as db:
             row = await db.scalar(
@@ -2150,6 +2170,7 @@ async def test_admin_audit_logs_settings_and_mappings_redact_secrets(tmp_path: P
             assert set(row.payload["changed_fields"]) == {
                 "auto_sync_enabled",
                 "default_vat",
+                "fallback_client_email",
                 "trigger_statuses",
                 "allowed_delivery_codes",
                 "retailcrm_api_key",
@@ -2158,6 +2179,7 @@ async def test_admin_audit_logs_settings_and_mappings_redact_secrets(tmp_path: P
             assert row.payload["values"] == {
                 "auto_sync_enabled": False,
                 "default_vat": "10",
+                "fallback_client_email": "example@example.com",
                 "trigger_statuses": ["new", "paid"],
                 "allowed_delivery_codes": ["courier"],
                 "retailcrm_api_key": "[UPDATED]",
@@ -2480,6 +2502,146 @@ async def test_done_callback_reconciliation(tmp_path: Path, scenario: str) -> No
             assert order["status"] == "delivering"
 
     await engine.dispose()
+
+@pytest.mark.asyncio
+async def test_reconciliation_retries_recent_failed_order(tmp_path: Path) -> None:
+    engine = create_engine(f"sqlite+aiosqlite:///{(tmp_path / 'retry.db').as_posix()}")
+    await init_db(engine, seed=True, env_settings=_test_env_settings())
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    order = {
+        "id": 42, "status": "delivering", "site": "main-site",
+        "items": [{"id": 10, "initialPrice": 100, "quantity": 1, "productName": "Корм"}],
+    }
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        calls.append((request.method, path))
+        if path == "/api/v5/orders/42":
+            return httpx.Response(200, json={"success": True, "order": order})
+        if path == "/api/shop/v2/orders":
+            return httpx.Response(201, json={"id": 99, "state": "new"})
+        if path == "/api/v5/orders/42/edit":
+            return httpx.Response(200, json={"success": True})
+        pytest.fail(f"Unexpected endpoint {path}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        crm = RetailCRMClient("https://example.retailcrm.ru", "key", client=http)
+        komtet = KomtetClient("shop", "secret", client=http)
+        async with sessions.begin() as db:
+            db.add_all([
+                OrderSync(retailcrm_order_id=42, sync_status="error", last_error="temporary"),
+                OrderSync(retailcrm_order_id=43, sync_status="error", komtet_state="done"),
+                OrderSync(retailcrm_order_id=44, sync_status="error",
+                          updated_at=datetime.now(timezone.utc) - timedelta(hours=49)),
+            ])
+            setting = await db.scalar(select(Setting).where(Setting.key == "auto_sync_enabled"))
+            setting.value = "false"
+        await run_reconciliation_cycle(sessions, crm_client=crm, komtet_client=komtet)
+        assert not calls
+        async with sessions.begin() as db:
+            setting = await db.scalar(select(Setting).where(Setting.key == "auto_sync_enabled"))
+            setting.value = "true"
+        await run_reconciliation_cycle(sessions, crm_client=crm, komtet_client=komtet)
+        assert calls == [
+            ("GET", "/api/v5/orders/42"), ("POST", "/api/shop/v2/orders"),
+            ("POST", "/api/v5/orders/42/edit"),
+        ]
+        async with sessions() as db:
+            row = await db.scalar(select(OrderSync).where(OrderSync.retailcrm_order_id == 42))
+            assert (row.sync_status, row.komtet_order_id, row.last_error) == ("synced", 99, None)
+            log = await db.scalar(select(SyncLog).where(SyncLog.event_type == "order_create"))
+            assert log.payload["trigger_event"] == "auto_retry"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_final_status_once", [False, True])
+async def test_reconciliation_polls_missed_callback_without_duplicate_payments(
+    tmp_path: Path, fail_final_status_once: bool,
+) -> None:
+    engine = create_engine(f"sqlite+aiosqlite:///{(tmp_path / 'poll.db').as_posix()}")
+    await init_db(engine, seed=True, env_settings=_test_env_settings())
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    order = {
+        "id": 42, "status": "delivering", "site": "main-site", "totalSumm": 200,
+        "items": [{"id": 10, "initialPrice": 100, "quantity": 2}], "payments": {},
+    }
+    detail = {
+        "id": 99, "state": "done", "items": [{"external_id": "10", "quantity": 1, "total": 100}],
+        "receipt_info": {"payments": [{"type": "card", "sum": 100}]},
+    }
+    writes = []
+    polls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal fail_final_status_once
+        path = request.url.path
+        if request.method == "GET" and path.startswith("/api/shop/v2/orders/"):
+            polls.append(path)
+            if path.endswith("/97"):
+                return httpx.Response(404)
+            if path.endswith("/98"):
+                return httpx.Response(200, json={"id": 98, "state": "canceled"})
+            assert path.endswith("/99")
+            return httpx.Response(200, json=detail)
+        if request.method == "GET" and path == "/api/v5/orders/42":
+            return httpx.Response(200, json={"success": True, "order": order})
+        writes.append(path)
+        form = parse_qs(request.content.decode())
+        if path == "/api/v5/orders/payments/create":
+            order["payments"]["20"] = {**json.loads(form["payment"][0]), "id": 20}
+        elif path == "/api/v5/orders/42/edit":
+            patch = json.loads(form["order"][0])
+            if patch.get("status") == "complete" and fail_final_status_once:
+                fail_final_status_once = False
+                return httpx.Response(400, json={"success": False, "errorMsg": "Edit conflict"})
+            order.update(patch)
+            if "items" in patch:
+                order["totalSumm"] = 100
+        else:
+            pytest.fail(f"Unexpected endpoint {path}")
+        return httpx.Response(200, json={"success": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        crm = RetailCRMClient("https://example.retailcrm.ru", "key", client=http)
+        komtet = KomtetClient("shop", "secret", client=http)
+        async with sessions.begin() as db:
+            db.add_all([
+                OrderSync(retailcrm_order_id=40, komtet_order_id=97, sync_status="synced"),
+                OrderSync(retailcrm_order_id=41, komtet_order_id=98, sync_status="synced"),
+                OrderSync(retailcrm_order_id=42, komtet_order_id=99, sync_status="synced"),
+                OrderSync(retailcrm_order_id=43, komtet_order_id=100, sync_status="synced",
+                          updated_at=datetime.now(timezone.utc) - timedelta(hours=73)),
+            ])
+        interrupted = fail_final_status_once
+        await run_reconciliation_cycle(sessions, crm_client=crm, komtet_client=komtet)
+        assert polls == [f"/api/shop/v2/orders/{order_id}" for order_id in (97, 98, 99)]
+        await run_reconciliation_cycle(sessions, crm_client=crm, komtet_client=komtet)
+        expected_polls = [f"/api/shop/v2/orders/{order_id}" for order_id in (97, 98, 99, 97)]
+        if interrupted:
+            expected_polls.append("/api/shop/v2/orders/99")
+        assert polls == expected_polls
+        async with sessions() as db:
+            canceled = await db.scalar(select(OrderSync).where(OrderSync.komtet_order_id == 98))
+            completed = await db.scalar(select(OrderSync).where(OrderSync.komtet_order_id == 99))
+            assert (canceled.komtet_state, canceled.sync_status) == ("canceled", "canceled")
+            assert (completed.komtet_state, completed.sync_status) == ("done", "completed")
+            # A delayed callback can arrive with a different payload from the GET response.
+            await sync_komtet_to_retailcrm(
+                db, {**detail, "external_id": "42"}, crm_client=crm, komtet_client=komtet,
+                signature_already_verified=True,
+            )
+        expected_writes = ["/api/v5/orders/42/edit", "/api/v5/orders/payments/create", "/api/v5/orders/42/edit"]
+        if interrupted:
+            expected_writes.append("/api/v5/orders/42/edit")
+        assert writes == expected_writes
+        assert order["items"][0]["quantity"] == 1
+        assert order["status"] == "complete"
+        assert order["payments"]["20"]["status"] == "paid"
+        assert order["payments"]["20"]["amount"] == 100
+    await engine.dispose()
+
 
 @pytest.mark.parametrize(("content_type", "body"), [
     ("", b"order_id=315454."),

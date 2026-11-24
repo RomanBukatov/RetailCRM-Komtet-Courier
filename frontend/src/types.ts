@@ -24,6 +24,7 @@ export interface SettingsResponse {
   tax_system: number;
   default_vat: string;
   payment_address: string;
+  fallback_client_email: string;
   company_inn: string;
   trigger_statuses: string[];
   cancel_statuses: string[];
@@ -52,6 +53,7 @@ export interface SettingsUpdateRequest {
   tax_system?: number;
   default_vat?: string;
   payment_address?: string;
+  fallback_client_email?: string;
   company_inn?: string;
   trigger_statuses?: string[];
   cancel_statuses?: string[];

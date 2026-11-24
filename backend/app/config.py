@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     app_timezone: str = "Europe/Moscow"
     log_level: str = "INFO"
     log_retention_days: int = 30
+    reconcile_interval_seconds: int = 300
     http_timeout_seconds: float = 15.0
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: list(DEFAULT_DEV_CORS_ORIGINS)

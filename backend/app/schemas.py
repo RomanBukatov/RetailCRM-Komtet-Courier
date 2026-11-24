@@ -49,6 +49,7 @@ class SettingsResponse(BaseModel):
     tax_system: int = 0
     default_vat: str = "22"
     payment_address: str = ""
+    fallback_client_email: str = ""
     company_inn: str = ""
     trigger_statuses: list[str] = Field(default_factory=list)
     cancel_statuses: list[str] = Field(default_factory=list)
@@ -79,6 +80,7 @@ class SettingsUpdateRequest(BaseModel):
     tax_system: Optional[int] = Field(default=None, ge=0, le=5)
     default_vat: Optional[str] = None
     payment_address: Optional[str] = None
+    fallback_client_email: str = ""
     company_inn: Optional[str] = None
     trigger_statuses: Optional[list[str]] = None
     cancel_statuses: Optional[list[str]] = None

@@ -9,18 +9,18 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Optional
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.clients.komtet import KomtetClient, KomtetError
 from app.clients.retailcrm import RetailCRMClient, RetailCRMError
-from app.config import get_app_timezone
+from app.config import Settings, get_app_timezone
 from app.models import OrderSync, SyncLog
 from app.services.mapper import (
     _allocate_money,
@@ -564,6 +564,7 @@ async def sync_retailcrm_to_komtet(
     ignore_status_filter: bool = False,
     crm_client: Optional[RetailCRMClient] = None,
     komtet_client: Optional[KomtetClient] = None,
+    reconciliation_retry: bool = False,
 ) -> dict[str, Any]:
     """Synchronize a single RetailCRM order to KOMTET Kassa (create, update, or cancel)."""
     async with _order_lock(order_id):
@@ -576,6 +577,7 @@ async def sync_retailcrm_to_komtet(
             ignore_status_filter=ignore_status_filter,
             crm_client=crm_client,
             komtet_client=komtet_client,
+            reconciliation_retry=reconciliation_retry,
         )
 
 
@@ -714,6 +716,7 @@ async def _sync_retailcrm_to_komtet_locked(
     ignore_status_filter: bool = False,
     crm_client: Optional[RetailCRMClient] = None,
     komtet_client: Optional[KomtetClient] = None,
+    reconciliation_retry: bool = False,
 ) -> dict[str, Any]:
     cfg = await load_runtime_config(session)
     mappings = await load_active_mappings(session)
@@ -744,6 +747,13 @@ async def _sync_retailcrm_to_komtet_locked(
     )
 
     now = _utc_now()
+    if reconciliation_retry and (
+        order_sync is None
+        or order_sync.sync_status != "error"
+        or order_sync.komtet_state in {"done", "canceled"}
+        or _ensure_utc(order_sync.updated_at) < now - timedelta(hours=48)
+    ):
+        return {"status": "skipped", "reason": "no_longer_retryable"}
     if not force and order_sync is not None:
         last_cb = _ensure_utc(order_sync.last_komtet_callback_at)
         if last_cb is not None:
@@ -875,7 +885,9 @@ async def _sync_retailcrm_to_komtet_locked(
             if komtet_id is not None and remote_state == "done":
                 order_sync.komtet_order_id = komtet_id
                 order_sync.komtet_state = "done"
-                order_sync.sync_status = "completed"
+                order_sync.sync_status = (
+                    "pending_reconciliation" if reconciliation_retry else "completed"
+                )
                 order_sync.last_error = None
                 logger.info(
                     "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=skipped "
@@ -1150,11 +1162,13 @@ async def _sync_retailcrm_to_komtet_locked(
                 await session.flush()
 
         # If the recovered KOMTET order is already fiscalized (`state == "done"`),
-        # mark the local record as completed and never issue a PUT update_order.
+        # Leave a recovered fiscalized order for reverse reconciliation during a retry.
         if komtet_id is not None and remote_state == "done":
             order_sync.komtet_order_id = komtet_id
             order_sync.komtet_state = "done"
-            order_sync.sync_status = "completed"
+            order_sync.sync_status = (
+                "pending_reconciliation" if reconciliation_retry else "completed"
+            )
             order_sync.last_error = None
             logger.info(
                 "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=skipped "
@@ -1174,7 +1188,7 @@ async def _sync_retailcrm_to_komtet_locked(
                 komtet_order_id=komtet_id,
                 message=(
                     f"KOMTET order #{komtet_id} is already 'done'; "
-                    "marked local sync as completed without updating KOMTET"
+                    f"recorded sync status '{order_sync.sync_status}'"
                 ),
                 payload={"trigger_event": trigger_event, "crm_status": status},
             )
@@ -1286,7 +1300,7 @@ async def _sync_retailcrm_to_komtet_locked(
             return await _create_in_komtet("new order" if not link_note else "stale link")
 
         # Existing KOMTET order -> check hash idempotency unless forced
-        if not force and order_sync.last_hash == payload_hash:
+        if not force and not reconciliation_retry and order_sync.last_hash == payload_hash:
             logger.info(
                 "[RCRM->KOMTET] order=%s site=%s status=%s delivery=%s -> action=skipped "
                 "komtet_id=%s reason=unchanged",
@@ -1345,7 +1359,9 @@ async def _sync_retailcrm_to_komtet_locked(
         order_sync.komtet_order_id = komtet_id
         order_sync.komtet_external_id = str(komtet_payload.get("external_id") or komtet_payload["order_id"])
         order_sync.komtet_state = str(updated.get("state") or order_sync.komtet_state or "new")
-        order_sync.sync_status = "synced"
+        order_sync.sync_status = (
+            "pending_reconciliation" if reconciliation_retry and order_sync.komtet_state == "done" else "synced"
+        )
         order_sync.last_hash = payload_hash
         order_sync.last_synced_at = now
         order_sync.last_error = None
@@ -1766,6 +1782,7 @@ async def _process_komtet_callback_locked(
     state: str,
     komtet: Optional[KomtetClient],
     komtet_factory: Callable[[RuntimeConfig], KomtetClient],
+    from_poll: bool = False,
 ) -> dict[str, Any]:
     if (
         order_sync is not None
@@ -1880,7 +1897,7 @@ async def _process_komtet_callback_locked(
     callback_items = _receipt_items(payload)
     receipt_payments = _receipt_payments(payload)
     komtet_order_id = komtet_order_id or order_sync.komtet_order_id
-    if (
+    if not from_poll and (
         callback_items is None or receipt_payments is None
         or not _payments_match_total(receipt_payments, _receipt_total(callback_items))
     ):
@@ -2051,11 +2068,13 @@ async def _process_komtet_callback_locked(
         session,
         direction="komtet_to_crm",
         level="WARNING" if overpaid > Decimal("0.00") else "INFO",
-        event_type="refund_required" if overpaid else "callback_processed",
+        event_type=("refund_required" if overpaid else
+                    "order_status_polled" if from_poll else "callback_processed"),
         retailcrm_order_id=retailcrm_order_id,
         komtet_order_id=komtet_order_id,
         message=(
-            f"Processed KOMTET callback (state=done): payment={payment_action} "
+            f"Processed KOMTET {'order status from polling' if from_poll else 'callback'} "
+            f"(state=done): payment={payment_action} "
             f"({float(remaining_to_pay):.2f} {target_crm_payment_type}), "
             f"items_changed={items_changed}, final_status={cfg.final_status}"
             + (f", OVERPAID by {overpaid:.2f} (refund required)" if overpaid > 0 else "")
@@ -2073,3 +2092,114 @@ async def _process_komtet_callback_locked(
         "payment_type": target_crm_payment_type,
         "final_status": cfg.final_status,
     }
+
+
+# ---------------------------------------------------------------------------
+# Background reconciliation
+# ---------------------------------------------------------------------------
+
+
+async def run_reconciliation_cycle(
+    sessions: async_sessionmaker[AsyncSession],
+    *,
+    env_settings: Optional[Settings] = None,
+    crm_client: Optional[RetailCRMClient] = None,
+    komtet_client: Optional[KomtetClient] = None,
+    after_ids: tuple[int, int] = (0, 0),
+) -> tuple[int, int]:
+    """Check a bounded batch in each direction and return the cursors for the next cycle."""
+    retry_after_id, poll_after_id = after_ids
+    now = _utc_now()
+    poll_candidates = (
+        OrderSync.komtet_order_id.is_not(None),
+        OrderSync.updated_at >= now - timedelta(hours=72),
+        OrderSync.sync_status.in_(("synced", "pending_reconciliation", "error")),
+        # A receipt may already be finalized while its RetailCRM updates are still pending.
+        or_(OrderSync.komtet_state.is_(None), OrderSync.komtet_state != "canceled"),
+        or_(OrderSync.komtet_state.is_(None), OrderSync.komtet_state != "done",
+            OrderSync.sync_status.in_(("pending_reconciliation", "error"))),
+    )
+    async with sessions() as session:
+        cfg = await load_runtime_config(session, env_settings=env_settings)
+        if not cfg.auto_sync_enabled:
+            logger.info("Reconciliation cycle skipped: auto sync is disabled")
+            return after_ids
+        polls = (await session.execute(
+            select(OrderSync.id, OrderSync.retailcrm_order_id)
+            .where(*poll_candidates)
+            .order_by(OrderSync.id <= poll_after_id, OrderSync.id)
+            .limit(25)
+        )).all()
+        retries = (await session.execute(
+            select(OrderSync.id, OrderSync.retailcrm_order_id)
+            .where(
+                OrderSync.sync_status == "error",
+                OrderSync.updated_at >= now - timedelta(hours=48),
+                or_(OrderSync.komtet_state.is_(None), OrderSync.komtet_state.not_in(("done", "canceled"))),
+            )
+            .order_by(OrderSync.id <= retry_after_id, OrderSync.id)
+            .limit(20)
+        )).all()
+
+    # Check remote final states before replaying outbound changes for the same order.
+    for row_id, order_id in polls:
+        poll_after_id = row_id
+        try:
+            async with _order_lock(order_id), sessions() as session:
+                row = await session.scalar(select(OrderSync).where(OrderSync.id == row_id, *poll_candidates))
+                if row is None:
+                    continue
+                komtet_order_id = row.komtet_order_id
+                if komtet_client is None:
+                    async with build_komtet_client(cfg) as client:
+                        detail = await client.get_order(komtet_order_id)
+                else:
+                    detail = await komtet_client.get_order(komtet_order_id)
+                state = str(detail.get("state") or "").strip().lower()
+                if state not in {"done", "canceled"}:
+                    continue
+                if str(detail.get("id")) != str(komtet_order_id):
+                    raise ValueError(f"KOMTET returned a different order for #{komtet_order_id}")
+                if state == "canceled":
+                    row.komtet_state = "canceled"
+                    row.sync_status = "canceled"
+                    row.last_error = None
+                    await _add_sync_log(
+                        session, direction="komtet_to_crm", level="INFO", event_type="order_status_polled",
+                        retailcrm_order_id=order_id, komtet_order_id=komtet_order_id,
+                        message="KOMTET order state 'canceled' detected by polling",
+                    )
+                    await session.commit()
+                    continue
+                row.komtet_state = "done"
+                row.sync_status = "pending_reconciliation"
+                await session.commit()
+                mappings = await load_active_mappings(session)
+                crm = crm_client or build_retailcrm_client(cfg)
+                try:
+                    await _process_komtet_callback_locked(
+                        session, cfg=cfg, mappings=mappings, crm=crm, payload=detail,
+                        order_sync=row, retailcrm_order_id=order_id, komtet_order_id=komtet_order_id,
+                        raw_ext_id=None, state=state, komtet=None, komtet_factory=build_komtet_client,
+                        from_poll=True,
+                    )
+                finally:
+                    if crm_client is None:
+                        await crm.close()
+        except Exception:
+            logger.exception("Reconciliation could not check KOMTET status for RetailCRM order %s", order_id)
+
+    for row_id, order_id in retries:
+        retry_after_id = row_id
+        try:
+            async with sessions() as session:
+                await sync_retailcrm_to_komtet(
+                    session, order_id, trigger_event="auto_retry",
+                    crm_client=crm_client, komtet_client=komtet_client,
+                    reconciliation_retry=True,
+                )
+        except Exception:
+            logger.exception("Reconciliation could not retry RetailCRM order %s", order_id)
+
+    logger.info("Reconciliation cycle finished (status checks=%d, retry candidates=%d)", len(polls), len(retries))
+    return retry_after_id, poll_after_id

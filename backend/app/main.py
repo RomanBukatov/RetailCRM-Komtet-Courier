@@ -13,9 +13,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
-from app.database import cleanup_old_logs, engine, get_db, init_db
+from app.database import async_session_factory, cleanup_old_logs, engine, get_db, init_db
 from app.routers.admin_api import router as admin_router
 from app.routers.webhooks import router as webhooks_router
+from app.services.sync_service import run_reconciliation_cycle
 
 settings = get_settings()
 
@@ -95,6 +96,18 @@ async def _log_retention_loop(retention_days: int) -> None:
         await asyncio.sleep(sleep_seconds)
 
 
+async def _reconciliation_loop(cfg: Settings) -> None:
+    interval = cfg.reconcile_interval_seconds
+    logger.info("Reconciliation worker started (interval=%d seconds)", interval)
+    after_ids = (0, 0)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            after_ids = await run_reconciliation_cycle(async_session_factory, env_settings=cfg, after_ids=after_ids)
+        except Exception:
+            logger.exception("Reconciliation cycle failed")
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
     """Initialize database schema and seed defaults on startup; dispose engine on shutdown."""
@@ -114,13 +127,18 @@ async def lifespan(application: FastAPI) -> AsyncGenerator[None, None]:
             "Log retention cleanup disabled (LOG_RETENTION_DAYS=%d)",
             cfg.log_retention_days,
         )
+    reconciliation_task = None
+    if cfg.app_env != "test" and cfg.reconcile_interval_seconds > 0:
+        reconciliation_task = asyncio.create_task(_reconciliation_loop(cfg), name="order_reconciliation")
     try:
         yield
     finally:
-        if cleanup_task is not None:
-            cleanup_task.cancel()
+        tasks = [task for task in (cleanup_task, reconciliation_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
             with suppress(asyncio.CancelledError):
-                await cleanup_task
+                await task
         await engine.dispose()
         logger.info("Shutdown complete")
 

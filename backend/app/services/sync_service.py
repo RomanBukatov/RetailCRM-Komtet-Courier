@@ -7,11 +7,13 @@ import hashlib
 import json
 import logging
 import re
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from time import monotonic
 from typing import Any, Optional
 
 import httpx
@@ -61,6 +63,50 @@ class _LockEntry:
 
 
 _ORDER_LOCKS: dict[int, _LockEntry] = {}
+
+# Scope entries to the CRM account as well as the site when admin settings change.
+_MARK_CACHE: OrderedDict[tuple[str, Optional[str], int], tuple[float, bool]] = OrderedDict()
+_MARK_TTL = 600
+_MARK_CACHE_LIMIT = 4096
+
+
+async def _catalog_marked_offers(
+    crm: RetailCRMClient, account: str, site: Optional[str], order: dict[str, Any],
+) -> frozenset[int]:
+    ids = {
+        offer["id"] for item in order.get("items") or []
+        if isinstance(offer := item.get("offer"), dict) and type(offer.get("id")) is int
+    }
+    now = monotonic()
+    marked: set[int] = set()
+    missing: list[int] = []
+    for offer_id in sorted(ids):
+        entry = _MARK_CACHE.get((account, site, offer_id))
+        if entry is None or entry[0] <= now:
+            missing.append(offer_id)
+        elif entry[1]:
+            marked.add(offer_id)
+
+    for start in range(0, len(missing), 100):
+        batch = missing[start:start + 100]
+        try:
+            response = await crm.get_offers(batch, site)
+        except (RetailCRMError, httpx.RequestError, TimeoutError) as exc:
+            logger.warning("Catalog marking lookup failed for site %s: %s", site, exc)
+            continue
+        for offer in response.get("offers") or []:
+            offer_id = offer.get("id")
+            flag = (offer.get("product") or {}).get("markable")
+            if offer_id not in batch or not isinstance(flag, bool):
+                continue
+            key = (account, site, offer_id)
+            _MARK_CACHE[key] = (monotonic() + _MARK_TTL, flag)
+            _MARK_CACHE.move_to_end(key)
+            if len(_MARK_CACHE) > _MARK_CACHE_LIMIT:
+                _MARK_CACHE.popitem(last=False)
+            if flag:
+                marked.add(offer_id)
+    return frozenset(marked)
 
 
 @asynccontextmanager
@@ -1137,7 +1183,12 @@ async def _sync_retailcrm_to_komtet_locked(
                 "komtet_order_id": order_sync.komtet_order_id,
             }
 
-        komtet_payload, payload_hash = map_retailcrm_order_to_komtet(order, cfg, mappings)
+        marked_offers = frozenset()
+        if cfg.marking_mode == "catalog":
+            marked_offers = await _catalog_marked_offers(crm, cfg.retailcrm_url, resolved_site, order)
+        komtet_payload, payload_hash = map_retailcrm_order_to_komtet(
+            order, cfg, mappings, marked_offer_ids=marked_offers,
+        )
 
         if komtet is None:
             komtet = build_komtet_client(cfg)

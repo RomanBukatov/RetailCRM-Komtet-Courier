@@ -498,6 +498,7 @@ def map_retailcrm_order_to_komtet(
     mappings: MappingLookup,
     *,
     reference_date: Optional[date] = None,
+    marked_offer_ids: frozenset[int] = frozenset(),
 ) -> tuple[dict[str, Any], str]:
     """Map a RetailCRM API v5 order into a KOMTET Kassa v1 or v2 delivery order payload."""
     api_version = config.komtet_api_version
@@ -533,6 +534,9 @@ def map_retailcrm_order_to_komtet(
             {
                 "id": item_id,
                 "base_id": item_id,
+                "needs_mark": config.marking_mode == "all" or (
+                    config.marking_mode == "catalog" and offer.get("id") in marked_offer_ids
+                ),
                 "name": item_name,
                 "quantity": qty,
                 "vat": map_vat_rate(
@@ -568,7 +572,7 @@ def map_retailcrm_order_to_komtet(
                 base_item,
                 base_item["quantity"],
                 adj_total,
-                require_mark_code=config.require_mark_code,
+                require_mark_code=base_item["needs_mark"],
                 api_version=api_version,
             )
         )

@@ -19,6 +19,7 @@ def _ensure_utc_datetime(value: datetime) -> datetime:
 
 
 UtcDateTime = Annotated[datetime, AfterValidator(_ensure_utc_datetime)]
+MarkingMode = Literal["off", "catalog", "all"]
 
 
 class SettingItemSchema(BaseModel):
@@ -59,6 +60,7 @@ class SettingsResponse(BaseModel):
     default_delivery_time_to: str = "21:00"
     komtet_callback_url: str = ""
     require_mark_code: bool = False
+    marking_mode: MarkingMode = "off"
     verify_komtet_signature: bool = True
     anti_loop_seconds: int = 15
     treat_paid_status_as_prepaid: bool = False
@@ -91,6 +93,7 @@ class SettingsUpdateRequest(BaseModel):
     default_delivery_time_to: Optional[str] = None
     komtet_callback_url: Optional[str] = None
     require_mark_code: Optional[bool] = None
+    marking_mode: Optional[MarkingMode] = None
     verify_komtet_signature: Optional[bool] = None
     anti_loop_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
     treat_paid_status_as_prepaid: Optional[bool] = None

@@ -324,6 +324,12 @@ class RetailCRMClient:
             params["filter"] = filters
         return await self._request("GET", "/orders", params=params)
 
+    async def get_offers(self, ids: list[int], site: Optional[str]) -> dict[str, Any]:
+        filters: dict[str, Any] = {"ids": ids}
+        if site:
+            filters["sites"] = [site]
+        return await self._request("GET", "/store/offers", params={"filter": filters, "limit": 100})
+
     async def edit_order(
         self,
         order_id: int | str,

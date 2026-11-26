@@ -125,6 +125,59 @@ def _sample_mappings() -> MappingLookup:
 # 1. Mapper unit tests
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize(("mode", "legacy", "expected_mode", "flags"), [
+    ("catalog", False, "catalog", [True, True, False, False]),
+    ("off", True, "off", [False, False, False]),
+    ("all", False, "all", [True] * 5 + [False]),
+    (None, True, "all", [True] * 5 + [False]),
+    (None, False, "off", [False, False, False]),
+])
+def test_selective_marking(mode, legacy, expected_mode, flags):
+    cfg = _sample_config(marking_mode=mode, require_mark_code=legacy)
+    assert cfg.marking_mode == expected_mode
+    assert cfg.require_mark_code == (expected_mode != "off")
+    order = {"id": 1, "items": [
+        {"id": 11, "quantity": 2, "initialPrice": 20, "offer": {"id": 101}},
+        {"id": 12, "quantity": 3, "initialPrice": 10, "offer": {"id": 102}},
+    ], "delivery": {"cost": 50}}
+    payload, _ = map_retailcrm_order_to_komtet(
+        order, cfg, _sample_mappings(), marked_offer_ids=frozenset({101}),
+    )
+    lines = payload["items"]
+    assert [line["is_need_mark_code"] for line in lines] == flags
+    if mode == "catalog":
+        assert [(line["external_id"], line["quantity"]) for line in lines] == [
+            ("11_m1", 1), ("11_m2", 1), ("12", 3), ("delivery", 1),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_catalog_marking_cache(monkeypatch):
+    from collections import OrderedDict
+    from unittest.mock import AsyncMock
+    from app.services import sync_service
+
+    monkeypatch.setattr(sync_service, "_MARK_CACHE", OrderedDict())
+    now = 1000
+    monkeypatch.setattr(sync_service, "monotonic", lambda: now)
+    client = AsyncMock()
+    client.get_offers.return_value = {"offers": [
+        {"id": 1, "product": {"markable": True}}, {"id": 2, "product": {"markable": False}},
+    ]}
+    order = {"items": [{"offer": {"id": i}} for i in [1, 1, 2]]}
+    async def lookup():
+        return await sync_service._catalog_marked_offers(client, "crm", "shop", order)
+
+    assert await lookup() == {1}
+    assert await lookup() == {1}
+    client.get_offers.assert_awaited_once_with([1, 2], "shop")
+    now += 601
+    client.get_offers.side_effect = TimeoutError()
+    assert await lookup() == set()
+    client.get_offers.side_effect = None
+    assert await lookup() == {1}
+    assert client.get_offers.await_count == 3
+
 @pytest.mark.parametrize(("version", "enabled", "prepaid", "expected"), [
     ("v2", True, 0, 3160), ("v1", True, 0, 3160),
     ("v2", False, 0, 0), ("v2", True, 500, 500),
@@ -850,6 +903,17 @@ async def test_webhooks_and_admin_api_endpoints(tmp_path: Path) -> None:
         assert r_set.status_code == 200
         s_data = r_set.json()
         assert s_data["tax_system"] == 0
+        assert s_data["marking_mode"] == "off"
+        for update, mode in [
+            ({"require_mark_code": True}, "all"),
+            ({"marking_mode": "catalog", "require_mark_code": False}, "catalog"),
+            ({"default_vat": "10"}, "catalog"),
+            ({"require_mark_code": False}, "off"),
+        ]:
+            saved = await client.put("/api/v1/settings", json=update)
+            assert saved.status_code == 200
+            assert saved.json()["marking_mode"] == mode
+            assert saved.json()["require_mark_code"] == (mode != "off")
         assert s_data["final_status"] == "complete"
         assert s_data["retailcrm_api_key_masked"] == "****9999"
         assert s_data["komtet_secret_key_masked"] == "****8888"

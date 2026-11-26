@@ -98,6 +98,8 @@ async def save_settings(
 
     after_cfg = await load_runtime_config(db, env_settings=app_settings)
     submitted = payload.model_dump(exclude_unset=True)
+    if "require_mark_code" in submitted:
+        submitted.setdefault("marking_mode", after_cfg.marking_mode)
     changed_fields: list[str] = []
     changed_values: dict[str, Any] = {}
 

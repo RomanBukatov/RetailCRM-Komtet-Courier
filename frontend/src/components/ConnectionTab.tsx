@@ -16,6 +16,7 @@ import {
 import { api, ApiError } from "../api";
 import type {
   ApiVersion,
+  MarkingMode,
   ConnectionCheckResult,
   SettingsResponse,
   SettingsUpdateRequest,
@@ -120,7 +121,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
   const [customFieldCode, setCustomFieldCode] = useState("komtet_id");
   const [treatPaidStatusAsPrepaid, setTreatPaidStatusAsPrepaid] = useState(false);
   const [autoSyncEnabled, setAutoSyncEnabled] = useState(true);
-  const [requireMarkCode, setRequireMarkCode] = useState(false);
+  const [markingMode, setMarkingMode] = useState<MarkingMode>("off");
   const [verifyKomtetSignature, setVerifyKomtetSignature] = useState(true);
 
   const [saving, setSaving] = useState(false);
@@ -174,7 +175,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
     setCustomFieldCode(settings.komtet_custom_field_code || "komtet_id");
     setTreatPaidStatusAsPrepaid(settings.treat_paid_status_as_prepaid ?? false);
     setAutoSyncEnabled(settings.auto_sync_enabled ?? true);
-    setRequireMarkCode(settings.require_mark_code ?? false);
+    setMarkingMode(settings.marking_mode ?? (settings.require_mark_code ? "all" : "off"));
     setVerifyKomtetSignature(settings.verify_komtet_signature ?? true);
   }, [settings]);
 
@@ -219,7 +220,7 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
       default_delivery_time_from: deliveryTimeFrom.trim(),
       default_delivery_time_to: deliveryTimeTo.trim(),
       komtet_callback_url: komtetCallbackUrl.trim(),
-      require_mark_code: requireMarkCode,
+      marking_mode: markingMode,
       verify_komtet_signature: verifyKomtetSignature,
       anti_loop_seconds: Number(antiLoopSeconds) || 0,
       treat_paid_status_as_prepaid: treatPaidStatusAsPrepaid,
@@ -750,21 +751,17 @@ export const ConnectionTab: React.FC<ConnectionTabProps> = ({
             />
           </label>
 
-          <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 hover:bg-slate-100/70">
-            <div className="min-w-0">
-              <div className="text-sm font-medium text-slate-900">
-                Запрашивать сканирование маркировки (Честный ЗНАК)
-              </div>
-              <div className="text-xs text-slate-500">
-                Передаёт в КОМТЕТ признак маркированного товара (кроме услуги доставки), чтобы приложение курьера открывало сканер DataMatrix перед закрытием чека.
-              </div>
-            </div>
-            <input
-              type="checkbox"
-              checked={requireMarkCode}
-              onChange={(e) => setRequireMarkCode(e.target.checked)}
-              className="h-5 w-5 shrink-0 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-            />
+          <label className="block rounded-xl border border-slate-200 bg-slate-50/70 p-3.5">
+            <span className="text-sm font-medium text-slate-900">Маркировка товаров (Честный ЗНАК)</span>
+            <select value={markingMode} onChange={(e) => setMarkingMode(e.target.value as MarkingMode)}
+              className="mt-2 w-full rounded-lg border border-slate-300 bg-white p-2 text-sm">
+              <option value="off">Выключена (не запрашивать сканирование)</option>
+              <option value="catalog">Выборочно по признаку товара из каталога RetailCRM</option>
+              <option value="all">Для всех товаров (кроме доставки)</option>
+            </select>
+            <span className="mt-1 block text-xs text-slate-500">
+              При выборочной маркировке курьер сканирует код каждой упаковки товара, отмеченного в каталоге RetailCRM.
+            </span>
           </label>
 
           <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3.5 hover:bg-slate-100/70">

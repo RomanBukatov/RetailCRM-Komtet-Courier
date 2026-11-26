@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings, get_settings
 from app.models import Mapping, Setting
 from app.schemas import (
+    MarkingMode,
     MappingItemSchema,
     SettingItemSchema,
     SettingsResponse,
@@ -51,6 +52,12 @@ class RuntimeConfig:
     require_mark_code: bool = False
     fallback_client_email: str = ""
     treat_paid_status_as_prepaid: bool = False
+    marking_mode: Optional[MarkingMode] = None
+
+    def __post_init__(self) -> None:
+        mode = self.marking_mode or ("all" if self.require_mark_code else "off")
+        object.__setattr__(self, "marking_mode", mode)
+        object.__setattr__(self, "require_mark_code", mode != "off")
 
 
 @dataclass(frozen=True)
@@ -102,6 +109,7 @@ SETTING_DEFINITIONS: dict[str, tuple[str, bool, str, Any]] = {
     "default_delivery_time_to": ("string", False, "Время доставки по умолчанию (до)", "21:00"),
     "komtet_callback_url": ("string", False, "Публичный URL для callback от КОМТЕТ", ""),
     "require_mark_code": ("bool", False, "Запрашивать сканирование маркировки", False),
+    "marking_mode": ("string", False, "Маркировка товаров (Честный ЗНАК)", "off"),
     "verify_komtet_signature": ("bool", False, "Проверять X-HMAC-Signature от КОМТЕТ", True),
     "anti_loop_seconds": ("int", False, "Окно защиты от петли после callback (сек)", 15),
     "treat_paid_status_as_prepaid": (
@@ -230,6 +238,10 @@ async def seed_defaults(
         "komtet_callback_url": env.resolved_komtet_callback_url,
     }
 
+    if "marking_mode" not in existing_keys and "require_mark_code" in existing_keys:
+        legacy = await session.scalar(select(Setting.value).where(Setting.key == "require_mark_code"))
+        env_overrides["marking_mode"] = "all" if _deserialize_setting_value(legacy, "bool", False) else "off"
+
     for key, (value_type, is_secret, description, default_val) in SETTING_DEFINITIONS.items():
         if key in existing_keys:
             continue
@@ -319,6 +331,7 @@ async def load_runtime_config(
             get_val("komtet_callback_url", env.resolved_komtet_callback_url)
         ).strip(),
         require_mark_code=bool(get_val("require_mark_code")),
+        marking_mode=get_val("marking_mode") if "marking_mode" in db_map else None,
         verify_komtet_signature=bool(get_val("verify_komtet_signature")),
         anti_loop_seconds=int(get_val("anti_loop_seconds")),
         treat_paid_status_as_prepaid=bool(get_val("treat_paid_status_as_prepaid")),
@@ -381,6 +394,7 @@ async def get_settings_response(
         default_delivery_time_to=cfg.default_delivery_time_to,
         komtet_callback_url=cfg.komtet_callback_url,
         require_mark_code=cfg.require_mark_code,
+        marking_mode=cfg.marking_mode,
         verify_komtet_signature=cfg.verify_komtet_signature,
         anti_loop_seconds=cfg.anti_loop_seconds,
         treat_paid_status_as_prepaid=cfg.treat_paid_status_as_prepaid,
@@ -397,6 +411,10 @@ async def update_settings(
 ) -> SettingsResponse:
     """Persist settings updates to DB without overwriting secrets with masked placeholders."""
     updates = payload.model_dump(exclude_unset=True)
+    if updates.get("marking_mode") is not None:
+        updates["require_mark_code"] = updates["marking_mode"] != "off"
+    elif updates.get("require_mark_code") is not None:
+        updates["marking_mode"] = "all" if updates["require_mark_code"] else "off"
     if not updates:
         return await get_settings_response(session, env_settings=env_settings)
 

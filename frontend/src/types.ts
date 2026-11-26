@@ -1,4 +1,5 @@
 export type ApiVersion = "v1" | "v2";
+export type MarkingMode = "off" | "catalog" | "all";
 
 export interface SettingItem {
   key: string;
@@ -34,6 +35,7 @@ export interface SettingsResponse {
   default_delivery_time_to: string;
   komtet_callback_url: string;
   require_mark_code: boolean;
+  marking_mode: MarkingMode;
   verify_komtet_signature: boolean;
   anti_loop_seconds: number;
   treat_paid_status_as_prepaid: boolean;
@@ -64,6 +66,7 @@ export interface SettingsUpdateRequest {
   default_delivery_time_to?: string;
   komtet_callback_url?: string;
   require_mark_code?: boolean;
+  marking_mode?: MarkingMode;
   verify_komtet_signature?: boolean;
   anti_loop_seconds?: number;
   treat_paid_status_as_prepaid?: boolean;
